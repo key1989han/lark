@@ -20,7 +20,9 @@ arithmetic grammar happily parses). Then:
 Run directly:  python3 tools/tests/test_fuzz_differential.py
 """
 
+import json
 import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -55,6 +57,83 @@ def _write_fake_differ(tmpdir):
     path.write_text(_FAKE_DIFFER)
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
     return str(path)
+
+
+# A fake differ for the --fuzz-grammars find path: rejects EVERY input (valid
+# oracle-shaped JSON, exit 0), so any input the generated grammar's Python
+# parser accepts is a controlled accept/reject divergence — no live lark-rs bug
+# needed. It ignores argv, so --grammar-file invocations work unchanged.
+_REJECT_ALL_DIFFER = """#!/usr/bin/env python3
+import sys
+sys.stdin.read()
+print('{"ok": false, "tree": null}')
+"""
+
+
+def _run_tool(args, cwd):
+    return subprocess.run(
+        [sys.executable, str(TOOLS_DIR / "fuzz_differential.py"), *args],
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8")
+
+
+def test_seed_range_find_path():
+    """Pins the --gg-seed-range find/report plumbing (epic #208):
+
+    * a range sweep routes finds through the report path with the full replay
+      recipe (seed + count/gg_rules/gg_inputs) and exits 1;
+    * a seed's slice of a range run is byte-identical to a standalone --seed
+      run (same grammar/input finds);
+    * --gg-seed-range without --fuzz-grammars is a loud argparse error, never
+      a silent fall-through to the unrelated discovery mode."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake = Path(tmpdir) / "reject_all_differ"
+        fake.write_text(_REJECT_ALL_DIFFER)
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IRWXU)
+
+        common = ["--fuzz-grammars", "-n", "10", "--gg-inputs", "8",
+                  "--differ-bin", str(fake)]
+
+        # Range sweep: finds carry seed + recipe, exit code 1 (a find REDs CI).
+        finds_out = Path(tmpdir) / "range_finds.json"
+        proc = _run_tool(common + [
+            "--gg-seed-range", "13:14",
+            "--gg-scratch-dir", str(Path(tmpdir) / "range_scratch"),
+            "--gg-finds-out", str(finds_out)], tmpdir)
+        assert proc.returncode == 1, \
+            f"range sweep with a rejecting differ must exit 1, got " \
+            f"{proc.returncode}\n{proc.stdout}\n{proc.stderr}"
+        reports = json.loads(finds_out.read_text())
+        assert reports, "expected at least one find from seeds 13:14"
+        for r in reports:
+            assert r["seed"] in (13, 14), r
+            assert (r["count"], r["gg_rules"], r["gg_inputs"]) == (10, 4, 8), \
+                f"report must carry its replay recipe: {r}"
+
+        # Determinism: the range's seed-13 slice == a standalone --seed 13 run.
+        solo_out = Path(tmpdir) / "solo_finds.json"
+        proc = _run_tool(common + [
+            "--seed", "13",
+            "--gg-scratch-dir", str(Path(tmpdir) / "solo_scratch"),
+            "--gg-finds-out", str(solo_out)], tmpdir)
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        solo = json.loads(solo_out.read_text())
+
+        def key(r):  # grammar_file paths differ by scratch dir; compare content
+            return (r["seed"], r["grammar"], r["input"], r["minimized_input"])
+
+        range_13 = sorted(key(r) for r in reports if r["seed"] == 13)
+        assert range_13 == sorted(key(r) for r in solo), \
+            "seed 13's range slice must equal its standalone run"
+
+        # The guard: --gg-seed-range without --fuzz-grammars must error out
+        # (argparse exit 2), not silently run the discovery mode and exit 0.
+        proc = _run_tool(["--gg-seed-range", "13:14"], tmpdir)
+        assert proc.returncode == 2 and "--fuzz-grammars" in proc.stderr, \
+            f"expected a loud argparse error, got exit {proc.returncode}: " \
+            f"{proc.stderr}"
+
+    print("OK: --gg-seed-range find path carries seed+recipe, range slices "
+          "replay standalone, and the flag is loud without --fuzz-grammars.")
 
 
 def main():
@@ -104,6 +183,8 @@ def main():
 
     print("OK: over-minimization reproduced for the legacy predicate and "
           "prevented by the divergence-preserving predicate.")
+
+    test_seed_range_find_path()
 
 
 if __name__ == "__main__":

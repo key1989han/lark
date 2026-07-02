@@ -262,13 +262,14 @@ grammars diffed online against Python Lark. Both children are fixed and pinned �
 #176 (template + optional spurious reduce/reduce; `~n` now inlines like Python's
 `EBNF_to_BNF`) and #210 (seed-99 nullable-edge divergence; recurse-helper arm
 dedup) — and the epic-level gate is committed: **`scripts/fuzz-seed-range.sh`**
-replays seeds **1..300** (40 grammars × 15 inputs per seed; ~12k generated, ~4k
-oracle-built, ~60k inputs diffed, verified 0 divergences 2026-07-02) via
-`--gg-seed-range`, run nightly as the gating `seed-range-regression` job in
-`lark-rs-fuzz.yml`. Unlike the fresh-entropy discovery tiers, a RED there is a
-*regression* (never regress a green corpus); a fresh-entropy find is still filed
-as a new child, never silently dropped (§7). Widening the range is fine once the
-new seeds are verified clean; narrowing it needs XFAIL-ledger-level scrutiny.
+(ADR-0041) replays seeds **1..300** (40 grammars × 15 inputs per seed; 12000
+generated, 3832 oracle-built, 57480 inputs diffed, verified 0 divergences
+2026-07-02) via `--gg-seed-range`, run nightly as the gating
+`seed-range-regression` job in `lark-rs-fuzz.yml`. Unlike the fresh-entropy
+discovery tiers, a RED there is a *regression* (never regress a green corpus);
+a fresh-entropy find is still filed as a new child, never silently dropped (§7).
+The range is a ratchet: widening is fine once the new seeds are verified clean;
+narrowing needs XFAIL-ledger-level scrutiny (ADR-0041).
 
 **Next direction — semantic output backends (ADR-0027, Accepted).** Refactor
 `TreeBuilder` into the default impl of an internal `OutputBuilder` seam so tree

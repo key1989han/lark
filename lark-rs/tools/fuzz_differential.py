@@ -672,8 +672,14 @@ def fuzz_grammars(args, ap):
                 return False
 
         small = minimize(parser, inp, diverge_pred)
+        # A seed only replays under the SAME batch parameters, so the report
+        # carries the full recipe — a find is self-contained, not dependent on
+        # a comment somewhere staying in sync with the invocation.
         report = {
             "seed": seed,
+            "count": args.count,
+            "gg_rules": args.gg_rules,
+            "gg_inputs": args.gg_inputs,
             "grammar": grammar_text,
             "grammar_file": grammar_file_str,
             "input": inp,
@@ -749,6 +755,13 @@ def main():
                     help="write the minimized grammar-fuzz finds to FILE as JSON "
                          "(for the nightly artifact upload)")
     args = ap.parse_args()
+
+    # A --gg-* flag without --fuzz-grammars must be LOUD, not a silent no-op:
+    # `--gg-seed-range 1:300` alone would otherwise run the unrelated
+    # input-discovery mode and exit 0 — a vacuous green for what the caller
+    # believed was the committed regression sweep.
+    if args.gg_seed_range and not args.fuzz_grammars:
+        ap.error("--gg-seed-range requires --fuzz-grammars")
 
     # ── Random grammar fuzzing (its own self-contained discovery loop) ───────
     if args.fuzz_grammars:
