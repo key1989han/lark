@@ -123,12 +123,12 @@ fn token_to_py(py: Python<'_>, t: &Token) -> PyResult<PyObject> {
     let obj = cls.call1((
         t.type_.clone(),
         t.value.clone(),
-        t.start_pos,
-        t.line,
-        t.column,
-        t.end_line,
-        t.end_column,
-        t.end_pos,
+        t.start_pos(),
+        t.line(),
+        t.column(),
+        t.end_line(),
+        t.end_column(),
+        t.end_pos(),
     ))?;
     Ok(obj.unbind())
 }

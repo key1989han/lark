@@ -104,12 +104,12 @@ fn diff_outcomes(a: &LexOutcome, b: &LexOutcome) -> Option<String> {
                         "token {i}: Regex {:?}={:?}@{}..{} != Dfa {:?}={:?}@{}..{}",
                         x.type_,
                         x.value,
-                        x.start_pos,
-                        x.end_pos,
+                        x.start_pos(),
+                        x.end_pos(),
                         y.type_,
                         y.value,
-                        y.start_pos,
-                        y.end_pos
+                        y.start_pos(),
+                        y.end_pos()
                     ));
                 }
             }

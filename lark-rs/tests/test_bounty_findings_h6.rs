@@ -551,7 +551,7 @@ fn h6_5_meta_span_includes_filtered_tokens() {
     };
     // Python: start meta spans the whole "( cafX )" including the filtered parens: 0..8.
     assert_eq!(
-        (t.meta.start_pos, t.meta.end_pos),
+        (t.meta.start_pos(), t.meta.end_pos()),
         (Some(0), Some(8)),
         "H6-5: start meta must span the filtered '(' and ')' (0..8), matching Python; \
          lark-rs computed it from post-filter children (2..6)"

@@ -340,7 +340,7 @@ fn parse_tree_to_json(pt: &ParseTree) -> String {
                 push_json_str(&mut out, &tok.value);
                 out.push_str(&format!(
                     r#","line":{},"column":{},"endLine":{},"endColumn":{},"startPos":{},"endPos":{}}}"#,
-                    tok.line, tok.column, tok.end_line, tok.end_column, tok.start_pos, tok.end_pos
+                    tok.line(), tok.column(), tok.end_line(), tok.end_column(), tok.start_pos(), tok.end_pos()
                 ));
             }
             Emit::Tree(t) => {

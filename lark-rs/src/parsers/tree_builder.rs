@@ -28,7 +28,7 @@
 
 use crate::grammar::intern::{CompiledRule, SymbolId, SymbolTable};
 use crate::perf;
-use crate::tree::{Child, Meta, ParseTree, Token, Tree};
+use crate::tree::{Child, Meta, ParseTree, PosInt, Token, Tree};
 
 // ─── Root Slot → ParseTree ──────────────────────────────────────────────────
 
@@ -600,41 +600,41 @@ pub(crate) fn meta_from_token(t: &Token) -> Meta {
 // `node_meta_from_elems` reproduces `Meta::from_children` byte-for-byte over
 // `(Meta, GTag)` pairs (Token guards `> 0` on line/column; Tree reads meta directly;
 // None contributes nothing).
-fn gc_line(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_line(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::Token => m.line.filter(|&l| l > 0),
         GTag::Tree => m.line,
         GTag::None => Option::None,
     }
 }
-fn gc_column(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_column(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::Token => m.column.filter(|&c| c > 0),
         GTag::Tree => m.column,
         GTag::None => Option::None,
     }
 }
-fn gc_start(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_start(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::None => Option::None,
         _ => m.start_pos,
     }
 }
-fn gc_end_line(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end_line(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::Token => m.end_line.filter(|&l| l > 0),
         GTag::Tree => m.end_line,
         GTag::None => Option::None,
     }
 }
-fn gc_end_column(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end_column(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::Token => m.end_column.filter(|&c| c > 0),
         GTag::Tree => m.end_column,
         GTag::None => Option::None,
     }
 }
-fn gc_end(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end(m: &Meta, tag: GTag) -> Option<PosInt> {
     match tag {
         GTag::None => Option::None,
         _ => m.end_pos,

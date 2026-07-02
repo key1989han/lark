@@ -167,16 +167,16 @@ impl ParseError {
     ) -> ParseError {
         if token.type_id == crate::grammar::intern::SymbolId::END {
             ParseError::UnexpectedEof {
-                line: token.line,
-                col: token.column,
+                line: token.line as usize,
+                col: token.column as usize,
                 expected,
             }
         } else {
             ParseError::UnexpectedToken {
                 token: token.value.clone(),
                 token_type: token.type_.clone(),
-                line: token.line,
-                col: token.column,
+                line: token.line as usize,
+                col: token.column as usize,
                 expected,
             }
         }
@@ -199,8 +199,8 @@ impl ParseError {
         ParseError::UnexpectedToken {
             token: token.value.clone(),
             token_type: token.type_.clone(),
-            line: token.line,
-            col: token.column,
+            line: token.line as usize,
+            col: token.column as usize,
             expected,
         }
     }

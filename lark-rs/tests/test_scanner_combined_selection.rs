@@ -38,8 +38,8 @@ fn lex_outcome(lexer: &BasicLexer, input: &str) -> LexOutcome {
                 (
                     t.type_.to_string(),
                     t.value.to_string(),
-                    t.start_pos,
-                    t.end_pos,
+                    t.start_pos() as usize,
+                    t.end_pos() as usize,
                 )
             })
             .collect()),

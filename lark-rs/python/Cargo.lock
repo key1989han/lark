@@ -70,6 +70,7 @@ dependencies = [
  "regex-syntax",
  "smallvec",
  "thiserror",
+ "unicode-ident",
 ]
 
 [[package]]

@@ -107,12 +107,12 @@ impl<'i, 'g> SpanNode<'i, 'g> {
             // The raw `Meta` a shifted token contributes (all fields present,
             // `empty = false`) — the same shape `meta_from_token` builds.
             SpanNode::Token(t) => Some(Meta {
-                line: Some(t.line),
-                column: Some(t.column),
-                end_line: Some(t.end_line),
-                end_column: Some(t.end_column),
-                start_pos: Some(t.start_pos),
-                end_pos: Some(t.end_pos),
+                line: Some(t.line as u32),
+                column: Some(t.column as u32),
+                end_line: Some(t.end_line as u32),
+                end_column: Some(t.end_column as u32),
+                start_pos: Some(t.start_pos as u32),
+                end_pos: Some(t.end_pos as u32),
                 empty: false,
             }),
             SpanNode::Branch(b) => Some(b.meta.clone()),
@@ -144,12 +144,12 @@ impl<'i, 'g> SpanNode<'i, 'g> {
                 type_id: t.type_id,
                 type_: t.type_name.to_string(),
                 value: t.value.to_string(),
-                line: t.line,
-                column: t.column,
-                end_line: t.end_line,
-                end_column: t.end_column,
-                start_pos: t.start_pos,
-                end_pos: t.end_pos,
+                line: t.line as u32,
+                column: t.column as u32,
+                end_line: t.end_line as u32,
+                end_column: t.end_column as u32,
+                start_pos: t.start_pos as u32,
+                end_pos: t.end_pos as u32,
             }),
             SpanNode::Branch(b) => Child::Tree(Tree {
                 data: b.name.to_string(),
@@ -235,18 +235,18 @@ impl<'i, 'g> OutputBuilder<'i> for SpanTreeBuilder<'g> {
         let symbols: &'g SymbolTable = self.symbols;
         // `start_pos`/`end_pos` are char indices; map them to byte offsets through
         // the forward cursor before slicing (#278 — the two differ on non-ASCII).
-        let byte_start = self.byte_offset_at(input, token.start_pos);
-        let byte_end = self.byte_offset_at(input, token.end_pos);
+        let byte_start = self.byte_offset_at(input, token.start_pos as usize);
+        let byte_end = self.byte_offset_at(input, token.end_pos as usize);
         SpanNode::Token(SpanToken {
             type_id: token.type_id,
             type_name: symbols.name(token.type_id),
             value: &input[byte_start..byte_end],
-            line: token.line,
-            column: token.column,
-            end_line: token.end_line,
-            end_column: token.end_column,
-            start_pos: token.start_pos,
-            end_pos: token.end_pos,
+            line: token.line as usize,
+            column: token.column as usize,
+            end_line: token.end_line as usize,
+            end_column: token.end_column as usize,
+            start_pos: token.start_pos as usize,
+            end_pos: token.end_pos as usize,
         })
     }
 

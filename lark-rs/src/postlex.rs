@@ -19,19 +19,19 @@ use std::collections::VecDeque;
 
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::{SymbolId, SymbolTable};
-use crate::tree::Token;
+use crate::tree::{PosInt, Token};
 
 /// The subset of a [`Token`]'s position a synthetic token borrows. Copied off the
 /// triggering token so the hot loop never clones a whole `Token` just to remember
 /// "where the last one was" for the end-of-stream DEDENT flush.
 #[derive(Clone, Copy)]
 struct Pos {
-    line: usize,
-    column: usize,
-    end_line: usize,
-    end_column: usize,
-    start_pos: usize,
-    end_pos: usize,
+    line: PosInt,
+    column: PosInt,
+    end_line: PosInt,
+    end_column: PosInt,
+    start_pos: PosInt,
+    end_pos: PosInt,
 }
 
 impl Pos {

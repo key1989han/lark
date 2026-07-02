@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::error::ParseError;
 use crate::grammar::intern::SymbolId;
 use crate::lexer::DynamicMatcher;
-use crate::tree::Token;
+use crate::tree::{PosInt, Token};
 
 use super::chart::{Column, Delayed, Item, ScanSet};
 use super::forest::{Forest, ForestRef, NodeKey, Trans};
@@ -181,16 +181,16 @@ impl EarleyParser {
             type_id: term,
             type_: matcher.name(term).to_string(),
             value: value.to_string(),
-            line: lines[i],
-            column: cols[i],
-            end_line: lines[end_step],
-            end_column: cols[end_step],
+            line: lines[i] as PosInt,
+            column: cols[i] as PosInt,
+            end_line: lines[end_step] as PosInt,
+            end_column: cols[end_step] as PosInt,
             // `start_pos`/`end_pos` are **character** indices (Python parity, #278).
             // Columns here are indexed by character step, so the step index *is* the
             // char index — `i` and `end_step`, not the byte offsets
             // `boundaries[i]`/`boundaries[end_step]`.
-            start_pos: i,
-            end_pos: end_step,
+            start_pos: i as PosInt,
+            end_pos: end_step as PosInt,
         };
 
         // 1) Match each scan-set item's predicted terminal here. A hit is *delayed*

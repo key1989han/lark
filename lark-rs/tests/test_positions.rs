@@ -37,9 +37,9 @@ fn test_token_positions_multiline_and_unicode() {
     // line 2; "bc>" ends at column 4. (Python Lark: end_line=2, end_column=4.)
     let block = tok(c, 0);
     assert_eq!(block.type_, "BLOCK");
-    assert_eq!((block.line, block.column), (1, 1));
+    assert_eq!((block.line(), block.column()), (1, 1));
     assert_eq!(
-        (block.end_line, block.end_column),
+        (block.end_line(), block.end_column()),
         (2, 4),
         "multi-line token end position wrong"
     );
@@ -48,9 +48,9 @@ fn test_token_positions_multiline_and_unicode() {
     // char-based: 1 + 4 = 5, not 1 + 5. (Python Lark: line=3, end_column=5.)
     let name = tok(c, 1);
     assert_eq!(name.type_, "NAME");
-    assert_eq!((name.line, name.column), (3, 1));
+    assert_eq!((name.line(), name.column()), (3, 1));
     assert_eq!(
-        (name.end_line, name.end_column),
+        (name.end_line(), name.end_column()),
         (3, 5),
         "non-ASCII token end_column must count chars, not bytes"
     );

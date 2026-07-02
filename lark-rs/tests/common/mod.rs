@@ -295,7 +295,8 @@ fn match_meta(tree: &Tree, oracle_meta: &serde_json::Value) -> Result<(), String
         if !m.empty {
             return Err(format!(
                 "expected positionless (empty) meta, got start_pos={:?} end_pos={:?}",
-                m.start_pos, m.end_pos
+                m.start_pos(),
+                m.end_pos()
             ));
         }
         return Ok(());
@@ -310,12 +311,12 @@ fn match_meta(tree: &Tree, oracle_meta: &serde_json::Value) -> Result<(), String
         }
         Ok(())
     };
-    chk("start_pos", m.start_pos)?;
-    chk("end_pos", m.end_pos)?;
-    chk("line", m.line)?;
-    chk("column", m.column)?;
-    chk("end_line", m.end_line)?;
-    chk("end_column", m.end_column)?;
+    chk("start_pos", m.start_pos())?;
+    chk("end_pos", m.end_pos())?;
+    chk("line", m.line())?;
+    chk("column", m.column())?;
+    chk("end_line", m.end_line())?;
+    chk("end_column", m.end_column())?;
     Ok(())
 }
 

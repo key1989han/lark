@@ -611,9 +611,10 @@ fn n8_positions_are_char_indices() {
         panic!("N8: expected a token");
     };
     assert_eq!(
-        tok.end_pos, 5,
+        tok.end_pos(),
+        5,
         "N8: Python reports char index end_pos=5 for \"héllo\"; lark-rs gave {} (bytes)",
-        tok.end_pos
+        tok.end_pos()
     );
 }
 
