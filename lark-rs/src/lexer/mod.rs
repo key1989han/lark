@@ -385,7 +385,15 @@ impl BasicLexer {
         }
         Some(Token {
             type_id: id,
-            type_: self.names[id.index()].clone(),
+            // Span (value-less) tokens skip the name clone too — consistently with
+            // the contextual path (perf spike 2026-07-02): the span/tape builders
+            // resolve names lazily from `type_id`, and error reporting resolves the
+            // terminal name from the symbol table (`LalrParser::unexpected`), so the
+            // owned `type_` is dead weight on the span path.
+            type_: match mode {
+                TokenValueMode::Owned => self.names[id.index()].clone(),
+                TokenValueMode::Span => String::new(),
+            },
             value: token_value(value, mode),
             line: checked_pos(start_line),
             column: checked_pos(start_col),
@@ -700,7 +708,14 @@ impl ContextualLexer {
         }
         Token {
             type_id: id,
-            type_: self.names[id.index()].clone(),
+            // Span (value-less) tokens skip the name clone too: the span/tape
+            // builders resolve names lazily from `type_id`, so the owned `type_`
+            // is dead weight there — 1 alloc per token, including ignored ones
+            // (perf spike 2026-07-02).
+            type_: match mode {
+                TokenValueMode::Owned => self.names[id.index()].clone(),
+                TokenValueMode::Span => String::new(),
+            },
             value: token_value(value, mode),
             line: checked_pos(line),
             column: checked_pos(col),
@@ -715,6 +730,14 @@ impl ContextualLexer {
     /// current parser state. `mode` selects owned vs. value-less span tokens (C8.1
     /// #582); [`Self::next_token`] is the owned default, [`Self::next_token_span`] the
     /// span-emitting entry point.
+    ///
+    /// Returns the token together with its matched **byte length** (the scanner-
+    /// cursor advance distance), so a caller can move past the token in O(1) using
+    /// the end position the token already carries — [`build_token`](Self::build_token)
+    /// walked the matched text once for line/col bookkeeping; without the byte
+    /// length the caller would have to re-walk the same text
+    /// ([`LexerState::advance_by_chars`]) just to re-derive it (perf spike
+    /// 2026-07-02, the double per-token char scan). `$END` reports length 0.
     pub(crate) fn next_token_with_mode(
         &self,
         text: &str,
@@ -724,7 +747,7 @@ impl ContextualLexer {
         line: usize,
         col: usize,
         mode: TokenValueMode,
-    ) -> Result<Option<Token>, ParseError> {
+    ) -> Result<Option<(Token, usize)>, ParseError> {
         let slot = match self.state_to_scanner.get(state).copied() {
             Some(idx) if idx != u32::MAX => idx,
             // No scanner recorded for this state: fall back to state 0's
@@ -741,13 +764,18 @@ impl ContextualLexer {
         );
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
-            return Ok(Some(self.build_token(id, value, char_pos, line, col, mode)));
+            let nbytes = value.len();
+            return Ok(Some((
+                self.build_token(id, value, char_pos, line, col, mode),
+                nbytes,
+            )));
         }
 
         if pos >= text.len() {
-            return Ok(Some(
+            return Ok(Some((
                 Token::end().with_position(line, col, char_pos, char_pos),
-            ));
+                0,
+            )));
         }
 
         let ch = text[pos..].chars().next().unwrap();
@@ -771,7 +799,9 @@ impl ContextualLexer {
         line: usize,
         col: usize,
     ) -> Result<Option<Token>, ParseError> {
-        self.next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Owned)
+        Ok(self
+            .next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Owned)?
+            .map(|(tok, _)| tok))
     }
 
     /// The span-emitting path (C8.1 #582): builds a **value-less** token (empty
@@ -787,7 +817,9 @@ impl ContextualLexer {
         line: usize,
         col: usize,
     ) -> Result<Option<Token>, ParseError> {
-        self.next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Span)
+        Ok(self
+            .next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Span)?
+            .map(|(tok, _)| tok))
     }
 
     /// Match the next token at `pos` against the **root** (full) terminal set —
@@ -883,5 +915,22 @@ impl<'a> LexerState<'a> {
             self.char_pos += 1;
             self.pos += ch.len_utf8();
         }
+    }
+
+    /// O(1) cursor advance past a just-lexed token (perf spike 2026-07-02): the
+    /// token already carries its newline-aware end position — `build_token`
+    /// walked the matched text exactly once — so re-walking the same bytes
+    /// ([`advance_by_chars`](Self::advance_by_chars)) only re-derives what the
+    /// token knows. `nbytes` is the matched byte length the scanner reported
+    /// ([`ContextualLexer::next_token_with_mode`]). Identical net effect to
+    /// `advance_by_chars(end_pos - start_pos)` for any token the contextual
+    /// lexer built at the current cursor.
+    #[inline]
+    pub(crate) fn advance_past(&mut self, tok: &Token, nbytes: usize) {
+        debug_assert_eq!(tok.start_pos as usize, self.char_pos);
+        self.pos += nbytes;
+        self.char_pos = tok.end_pos as usize;
+        self.line = tok.end_line as usize;
+        self.col = tok.end_column as usize;
     }
 }

@@ -42,6 +42,20 @@ fn lark(grammar: &str, lexer: LexerType, propagate: bool) -> Lark {
     .expect("grammar builds")
 }
 
+/// Serializes the process-global `perf`-counter gate (`mod counters`, active only
+/// under `--features perf-counters`) against any *other* test in this binary that
+/// **charges** those counters via `parse()`/`parse_span()`. The counters are shared
+/// atomics, so a concurrent parse between the gate's `perf::reset()` and its reads
+/// would corrupt them (the gate documents this invariant). Every counter-charging
+/// test that could run alongside the gate holds this lock for its duration; it is
+/// uncontended (a plain no-op) when `perf-counters` is off. Poison is ignored — a
+/// panic in one holder must not cascade a confusing failure into the next.
+static COUNTER_GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn counter_gate_lock() -> std::sync::MutexGuard<'static, ()> {
+    COUNTER_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 const ARITH: &str = r#"
     start: sum
     ?sum: product | sum "+" product | sum "-" product
@@ -85,6 +99,9 @@ const SHAPES: &str = r#"
 /// The relative oracle: for every (lexer, propagate) configuration and input,
 /// `parse_span(input).materialize()` is byte-identical to `parse(input)`.
 fn assert_span_projects_to_parse(grammar: &str, inputs: &[&str]) {
+    // Charges the global perf counters via parse/parse_span — serialize against the
+    // counter gate (a no-op without `perf-counters`).
+    let _counters = counter_gate_lock();
     for lexer in [LexerType::Basic, LexerType::Contextual] {
         for propagate in [false, true] {
             let l = lark(grammar, lexer.clone(), propagate);
@@ -134,6 +151,7 @@ fn span_projects_to_parse_transparent_expand1_keepall() {
 
 #[test]
 fn span_token_values_borrow_the_input() {
+    let _counters = counter_gate_lock();
     let l = lark(ARITH, LexerType::Contextual, false);
     let input = String::from("12 + 345");
     let root = l.parse_span(&input).expect("parse_span ok");
@@ -184,6 +202,7 @@ fn span_token_values_borrow_the_input_non_ascii() {
     // byte offset that differs from its char index, so a char-index slice would cut
     // mid-codepoint (panic) or grab the wrong bytes.
     let input = String::from("å βeta 漢");
+    let _counters = counter_gate_lock();
     let l = lark(WORDS, LexerType::Contextual, false);
     let root = l.parse_span(&input).expect("parse_span ok");
 
@@ -243,6 +262,51 @@ fn parse_span_rejects_earley() {
         format!("{err}").contains("parser='lalr'"),
         "expected a typed LALR-only refusal, got: {err}"
     );
+}
+
+// ─── Error parity: span-mode name-less tokens must not degrade error reports ─────
+
+/// The span/tape token sources emit value-less, **name-less** tokens (`type_` is
+/// empty — the name is resolved lazily from `type_id`). A parse error must still
+/// report the correct terminal name in `token_type`: `LalrParser::unexpected`
+/// resolves it from the symbol table, so `parse_span` errors match `parse()`
+/// errors rather than leaking `token_type: ""`. Regression pin for the span-mode
+/// name-clone-skip review finding (perf spike 2026-07-02).
+#[test]
+fn span_error_token_type_matches_parse() {
+    const G: &str = r#"
+        start: A B
+        A: "a"
+        B: "b"
+        %ignore " "
+    "#;
+
+    fn token_type(err: &lark_rs::ParseError) -> &str {
+        match err {
+            lark_rs::ParseError::UnexpectedToken { token_type, .. } => token_type,
+            other => panic!("expected UnexpectedToken, got {other:?}"),
+        }
+    }
+
+    // This test charges the global perf counters via `parse()`, so it must not run
+    // concurrently with the `mod counters` gate (which reads them after a reset).
+    let _counters = counter_gate_lock();
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let l = lark(G, lexer.clone(), false);
+        // "a a": the second `A` appears where `B` is expected — an UnexpectedToken.
+        let parse_err = l.parse("a a").expect_err("parse must reject");
+        let span_err = match l.parse_span("a a").expect_err("parse_span must reject") {
+            lark_rs::LarkError::Parse(e) => e,
+            other => panic!("expected a Parse error, got {other:?}"),
+        };
+        assert_eq!(
+            token_type(&parse_err),
+            token_type(&span_err),
+            "span-mode error token_type must match parse() (lexer={lexer:?}); \
+             an empty string means the name-less span token leaked into the error"
+        );
+        assert_eq!(token_type(&span_err), "A", "the offending token is an A");
+    }
 }
 
 // ─── Whole-bank projection: span materialize == tree parse over the LALR bank ────
@@ -308,6 +372,9 @@ mod bank {
     /// is a real C8 regression, and we require zero.
     #[test]
     fn span_projects_to_parse_over_compliance_bank() {
+        // Charges the global perf counters via parse/parse_span over the whole bank —
+        // serialize against the counter gate (a no-op without `perf-counters`).
+        let _counters = super::counter_gate_lock();
         let Some(bank) = load_json("bank.json") else {
             eprintln!("compliance bank absent — skipping (generate with tools/)");
             return;
@@ -418,6 +485,9 @@ ITEM: "a"
             perf::ENABLED,
             "built with perf-counters but counters report disabled"
         );
+        // Hold the shared lock for the whole gate: no other counter-charging test in
+        // this binary may run between our `perf::reset()` and our counter reads.
+        let _counters = super::counter_gate_lock();
         let parser = Lark::new(
             LIST_GRAMMAR,
             LarkOptions {

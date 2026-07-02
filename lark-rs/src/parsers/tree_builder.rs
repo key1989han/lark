@@ -695,6 +695,30 @@ fn nones_at_gap(rule: &CompiledRule, gap: usize) -> usize {
 /// Shape one reduction of `rule` over its child stack slots into the parent value —
 /// the value-parametric mirror of `assemble` + `shape_with_container`. `builder`
 /// mints token/node/placeholder values; the engine owns every shaping decision.
+///
+/// ## Child-buffer reuse (perf spike 2026-07-02, the #583 reuse frontier)
+///
+/// Two structural facts make most reductions buffer-free:
+///
+/// * **`expand1` collapse is arity-1 by definition**, so a `?rule` whose single
+///   slot is a plain kept value needs no child list at all — the slot is returned
+///   unchanged (the fast path below), where the old path allocated and dropped a
+///   one-element buffer per collapse.
+/// * **EBNF `+`/`*` lower to *left*-recursive transparent helpers**
+///   (`_p: item | _p item`), so the growing spliced child list is always the
+///   *first* contribution to the next reduction. When nothing precedes it, the
+///   reduction **steals** that `Inline` buffer and pushes the remaining children
+///   onto it, instead of copying its whole prefix into a fresh buffer — which
+///   made a length-*n* list cost O(n²) element moves and one allocation per step.
+///
+/// Fresh buffers therefore scale with the *node* count (and only nodes whose
+/// first kept child isn't a spliced list), no longer the reduction count:
+/// `child_vec_allocs / semantic_reduce_calls` drops below 1, exactly the reuse
+/// signal the #583 gate doc anticipated. On top of that, the node branch drains
+/// `kept` instead of consuming it, so the emptied buffer cycles through a
+/// per-parse [`ReduceScratch`] — steady state, the engine's shaping scratch
+/// allocates only when a transparent splice carries a buffer away onto the value
+/// stack.
 pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     rule_idx: usize,
     rule: &CompiledRule,
@@ -706,39 +730,73 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     builder: &mut B,
     ctx: &OutputContext,
     propagate: bool,
+    scratch: &mut ReduceScratch<B::Value>,
 ) -> GSlot<B::Value> {
     // Output-shape counter (#230): one reduction shaped, matching `assemble`.
     perf::add_semantic_reduce_call();
 
-    // Child-buffer counter (#583/C8.2): this reduction allocates a fresh, owned child
-    // buffer (`kept` below) for its shaped children — bounded (O(children), never
-    // super-linear) but *not reused*, so the "bounded child-buffer reuse" line of
-    // #233 is currently satisfied only in its *bounded* half. One tick **per
-    // reduction** (a per-node unit, not a raw allocator count — the node-building
-    // branch's `values` vec and the placeholder `Inline` vec are intra-reduction
-    // scratch, deliberately not separately charged, because the reuse frontier is
-    // per-node). On a known LALR/`parse_into` input this equals the reduction count
-    // (flat per node); a future pooling/arena strategy (#242/#243) drives it *below*
-    // the node count. See `tests/test_child_vec_scaling.rs`.
-    perf::add_child_vec_alloc();
+    // Fast path: an `expand1` (`?rule`) arity-1 collapse over a single plain kept
+    // value returns the slot unchanged — no child buffer exists on this path, so
+    // nothing is allocated or copied. Guards reproduce the slow path exactly:
+    // no placeholders anywhere, the value not a filtered token, not discarded.
+    // (A `GSlot::Value` can never carry `GTag::None` — placeholders only travel
+    // inside `Inline` buffers — so the RC9 lone-`None` shape can't arrive here.)
+    if rule.options.expand1
+        && len == 1
+        && rule.alias.is_none()
+        && rule.options.placeholder_count == 0
+        && rule.options.nones_before.iter().all(|&n| n == 0)
+    {
+        if let Some(GSlot::Value(e)) = value_stack.last() {
+            let kept_here = e.tag != GTag::Token || keep_token_pos(rule, 0);
+            if kept_here && !builder.is_discard(&e.value) {
+                match value_stack.pop() {
+                    Some(slot) => return slot,
+                    None => unreachable!("value_stack.last() was Some"),
+                }
+            }
+        }
+    }
 
     // Flatten to the kept child list (drop per-position filtered punctuation, splice
     // transparent inlines, insert `nones_before` placeholders), accumulating the
     // pre-filter container span exactly as `assemble` does.
-    // Pre-size to the rule arity: right for every non-splicing reduction (an
-    // Inline splice can exceed it, but Vec growth handles that), and it removes
-    // the 4→8→16… growth reallocs the incremental pushes otherwise pay
-    // (perf spike 2026-07-01).
-    let mut kept: Vec<GElem<B::Value>> = Vec::with_capacity(len + rule.options.placeholder_count);
+    //
+    // The buffer is materialized lazily: while nothing has been kept yet, a spliced
+    // `Inline` buffer is *stolen* as the child list (the left-recursive EBNF-helper
+    // case — its whole prefix is never copied); the first plain push allocates with
+    // capacity for the rule's remaining arity, removing the 4→8→16… growth
+    // reallocs (perf spike 2026-07-01/02).
+    let mut kept: Vec<GElem<B::Value>> = Vec::new();
     let mut container = ContainerSpan::new();
     let placeholder = |builder: &mut B| GElem {
         value: builder.placeholder(ctx),
         meta: Meta::default(),
         tag: GTag::None,
     };
+    // First materialization of the `kept` buffer: recycle the scratch buffer when
+    // one is banked, else charge the child-buffer counter (#583/C8.2 — one *fresh*
+    // buffer; recycles, steals, and the fast path charge nothing) and reserve
+    // `$cap` slots. Every path that grows `kept` from empty *must* route through
+    // here so the recycling and the counter both see the allocation — including the
+    // trailing-placeholder pushes below, whose first push (for a reduction with no
+    // preceding kept child) would otherwise allocate silently.
+    macro_rules! materialize {
+        ($cap:expr) => {
+            if kept.capacity() == 0 {
+                if scratch.kept.capacity() > 0 {
+                    kept = std::mem::take(&mut scratch.kept);
+                } else {
+                    perf::add_child_vec_alloc();
+                }
+                kept.reserve($cap);
+            }
+        };
+    }
     let drain_start = value_stack.len() - len;
     for (i, slot) in value_stack.drain(drain_start..).enumerate() {
         for _ in 0..nones_at_gap(rule, i) {
+            materialize!(len - i + rule.options.placeholder_count);
             kept.push(placeholder(builder));
         }
         match slot {
@@ -748,21 +806,36 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
                 }
                 let filtered = e.tag == GTag::Token && !keep_token_pos(rule, i);
                 if !filtered {
+                    materialize!(len - i + rule.options.placeholder_count);
                     kept.push(e);
                 }
             }
-            GSlot::Inline(cs) => {
+            GSlot::Inline(mut cs) => {
                 if propagate {
                     for c in &cs {
                         container.observe_gelem(c);
                     }
                 }
-                kept.extend(cs);
+                if kept.capacity() == 0 {
+                    // Nothing kept yet: steal the spliced buffer wholesale. Its
+                    // elements keep their order and nothing precedes them, so
+                    // this is byte-identical to copying — minus the copy.
+                    kept = cs;
+                } else {
+                    kept.append(&mut cs);
+                }
             }
         }
     }
     // Trailing placeholders: an empty `[...]`'s widest-alternative count, plus a
-    // distributed absent `[...]` at the end of this alternative.
+    // distributed absent `[...]` at the end of this alternative. Materialize first
+    // (with room for both) so a reduction whose *only* children are trailing
+    // placeholders still recycles the scratch buffer and charges the counter — the
+    // buffer growth must not bypass `materialize!`.
+    let trailing = rule.options.placeholder_count + nones_at_gap(rule, rule.expansion.len());
+    if trailing > 0 {
+        materialize!(trailing);
+    }
     for _ in 0..rule.options.placeholder_count {
         kept.push(placeholder(builder));
     }
@@ -780,10 +853,15 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     } else if rule.options.expand1 && rule.alias.is_none() && kept.len() == 1 {
         // `?rule` with a single child: propagate it unchanged. A lone `None`
         // placeholder stays an inline of exactly one `None` (RC9/#289), so the parent
-        // splices one placeholder; a real single child collapses to a bare value.
+        // splices one placeholder (reusing this buffer); a real single child
+        // collapses to a bare value. (The no-buffer common case took the fast path
+        // above and never reaches here.)
         let e = kept.pop().unwrap();
         match e.tag {
-            GTag::None => GSlot::Inline(vec![e]),
+            GTag::None => {
+                kept.push(e);
+                GSlot::Inline(kept)
+            }
             _ => GSlot::Value(e),
         }
     } else {
@@ -791,13 +869,44 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
         if propagate {
             container.widen_meta(&mut node_meta);
         }
-        let mut values: Vec<B::Value> = kept.into_iter().map(|e| e.value).collect();
+        // Extract the child values by draining, not consuming: `kept` keeps its
+        // capacity and banks in the scratch for the next reduction. `values`
+        // likewise cycles — a taking builder (the tree backend `mem::take`s the
+        // children as the node's child list) leaves a fresh empty vec behind,
+        // while a reading builder (tape/null) leaves the buffer to be cleared
+        // and reused, so those paths reach a zero-alloc steady state.
+        let mut values = std::mem::take(&mut scratch.values);
+        values.reserve(kept.len());
+        values.extend(kept.drain(..).map(|e| e.value));
+        if kept.capacity() > scratch.kept.capacity() {
+            scratch.kept = kept;
+        }
         let value = builder.reduce(rule_idx, &mut values, &node_meta, ctx);
+        values.clear();
+        scratch.values = values;
         GSlot::Value(GElem {
             value,
             meta: node_meta,
             tag: GTag::Tree,
         })
+    }
+}
+
+/// Per-parse recycling scratch for [`shape_reduction`] (perf spike 2026-07-02):
+/// the emptied `kept` buffer and the (reading-builder) `values` buffer cycle
+/// here between reductions instead of round-tripping the allocator. Owned by the
+/// drive loop (`run_into`), one per parse.
+pub(crate) struct ReduceScratch<V> {
+    kept: Vec<GElem<V>>,
+    values: Vec<V>,
+}
+
+impl<V> ReduceScratch<V> {
+    pub(crate) fn new() -> Self {
+        ReduceScratch {
+            kept: Vec::new(),
+            values: Vec::new(),
+        }
     }
 }
 

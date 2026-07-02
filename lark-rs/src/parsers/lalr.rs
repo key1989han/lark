@@ -34,7 +34,7 @@ use super::token_source::{
 };
 use super::tree_builder::{
     accept_value, meta_from_token, shape_reduction, GElem, GSlot, GTag, OutputBuilder,
-    OutputContext, Slot, TreeOutputBuilder,
+    OutputContext, ReduceScratch, Slot, TreeOutputBuilder,
 };
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
@@ -1023,8 +1023,20 @@ impl LalrParser {
     /// Build the error for a token with no action in the current state, filling
     /// `expected` from the state's action row (only the parser knows it). Shared by
     /// the batch driver and the interactive parser (issue #168).
+    ///
+    /// The reported `token_type` is resolved from the token's interned `type_id`
+    /// via the symbol table, not read off `token.type_`. On the owned path the two
+    /// are byte-identical (the lexer sets `type_` from the same table), so this is
+    /// behaviour-preserving there; but the span/tape token sources emit value-less,
+    /// **name-less** tokens (positions + `type_id` only, for zero-alloc lexing), so
+    /// resolving from the id is what keeps `parse_span`/`parse_tape` error
+    /// `token_type` identical to `parse()` instead of leaking an empty string.
     pub(crate) fn unexpected(&self, state: usize, token: &Token) -> ParseError {
-        ParseError::unexpected_token(token, self.expected_at(state))
+        ParseError::unexpected_token_named(
+            token,
+            self.table.symbols.name(token.type_id),
+            self.expected_at(state),
+        )
     }
 
     /// A fresh [`ParserStack`] at the start state for `start` — the seed of an
@@ -1083,6 +1095,9 @@ impl LalrParser {
         let ctx = OutputContext::new(&self.table.rules, &self.table.symbols);
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<GSlot<B::Value>> = Vec::new();
+        // Recycled shaping buffers (perf spike 2026-07-02): reductions cycle their
+        // child buffers through here instead of the allocator.
+        let mut scratch: ReduceScratch<B::Value> = ReduceScratch::new();
 
         loop {
             let state = *state_stack.last().unwrap();
@@ -1135,6 +1150,7 @@ impl LalrParser {
                             builder,
                             &ctx,
                             self.table.propagate_positions,
+                            &mut scratch,
                         );
                         let top = *state_stack.last().unwrap();
                         let nt_index = (rule.origin.index() - self.table.n_terminals) as u32;

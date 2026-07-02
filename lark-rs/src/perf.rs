@@ -143,31 +143,21 @@
 //!   `build_node`/`build_token` and are engine-agnostic. It is the denominator that
 //!   makes the per-reduction output-build cost a flat envelope on the LALR/CYK paths
 //!   (`tests/test_output_counters.rs`, an LALR gate).
-//! * [`child_vec_allocs`] — one child-buffer allocation charged **per reduction**
-//!   the `parse_into` path shapes (`shape_reduction`, #583/C8.2). It tracks the
-//!   *reduction's* fresh, owned child buffer — the `kept` `Vec` every reduction
-//!   allocates to hold its shaped children — as the unit of the "bounded child-buffer
-//!   reuse" claim; it is a per-node tick, **not** a raw allocator count (a
-//!   node-building reduction also allocates a second `values` buffer and a
-//!   placeholder path may allocate an `Inline` vec — those intra-reduction buffers
-//!   are deliberately *not* separately ticked, because the reuse frontier #233/#242
-//!   targets is per-*node*, not per-scratch-vec). The honest close-out of #233's last
-//!   done-when line ("bounded child-buffer reuse"): C8 shipped the `SpanTree` output
-//!   backend but each reduction still allocates a **fresh** owned child buffer —
-//!   bounded (O(children) per node, no super-linear blowup), but neither reused nor
-//!   counter-gated, so the claim was unproven. This counter makes the *current*
-//!   bounded-but-not-reused state a deterministic result: on a known LALR/`parse_into`
-//!   input it equals the parser's user-rule reduction count (one tick per
-//!   `shape_reduction` call), so it scales **flat per node** with the output shape and
-//!   never super-linearly. Its per-reduction denominator is [`semantic_reduce_calls`]:
-//!   `child_vec_allocs / semantic_reduce_calls == 1` is the boundedness envelope the
-//!   gate (`tests/test_child_vec_scaling.rs`) asserts. An owned-per-node
-//!   representation like today's `SpanBranch` inherently cannot reuse the buffer it
-//!   retains, so a genuine reuse win (allocations `<` node count) needs the
-//!   arena/`Tape` backend (#242/#243), not `SpanTree` — this counter is the gate a
-//!   future pooling/arena strategy would drive *below* the reduction count. It lives
-//!   on the value-parametric `shape_reduction` seam, so it is engine-scoped to the
-//!   LALR `run_into` / `parse_into` path (Earley/CYK stay on the concrete
+//! * [`child_vec_allocs`] — one **fresh** child-buffer allocation charged per
+//!   `shape_reduction` materialization on the `parse_into` path (#583/C8.2). It
+//!   tracks the reduction's owned `kept` buffer as a per-buffer unit, **not** a raw
+//!   allocator count. Since the child-buffer reuse pass (perf spike 2026-07-02) a
+//!   reduction usually *recycles* instead of allocating — stealing a transparent
+//!   `Inline` splice buffer, taking the banked `ReduceScratch` buffer, or (for an
+//!   arity-1 `expand1` collapse) needing no buffer at all — and none of those charge
+//!   the counter. The counter therefore reports the **reuse ratio** the #583 gate
+//!   doc anticipated: `child_vec_allocs / semantic_reduce_calls` sits *below* 1
+//!   (on the gate's list grammar it is exactly 1 fresh buffer per parse,
+//!   independent of input size — `tests/test_child_vec_scaling.rs` pins that
+//!   closed form). Rising back toward one-per-reduction means the recycling was
+//!   lost; rising past it means a per-child blowup. It lives on the
+//!   value-parametric `shape_reduction` seam, so it is engine-scoped to the LALR
+//!   `run_into` / `parse_into` path (Earley/CYK stay on the concrete
 //!   `assemble`/`shape` path and do not increment it), exactly like
 //!   [`semantic_reduce_calls`]'s LALR/CYK scoping.
 
@@ -333,13 +323,12 @@ mod imp {
         SEMANTIC_REDUCE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Charge one child-buffer allocation **per reduction** the `parse_into` path
-    /// shapes (`shape_reduction`, #583/C8.2) — the reduction's owned child buffer, a
-    /// per-node tick, not a raw allocator count (intra-reduction scratch vecs are not
-    /// separately charged; see the module doc). For a known LALR/`parse_into` input
-    /// this equals the user-rule reduction count (one tick per reduction), so it stays
-    /// flat per node with the output shape; a future pooling/arena reuse strategy
-    /// drives it *below* the node count. Gated in `tests/test_child_vec_scaling.rs`.
+    /// Charge one **fresh** child-buffer allocation on the `parse_into` shaping
+    /// path (`shape_reduction`, #583/C8.2) — a per-buffer unit, not a raw allocator
+    /// count. Recycled buffers (`ReduceScratch`, `Inline` steals) and the `expand1`
+    /// fast path charge nothing, so the counter reports the reuse ratio (below one
+    /// per reduction since the 2026-07-02 reuse pass). Gated in
+    /// `tests/test_child_vec_scaling.rs`.
     #[inline]
     pub fn add_child_vec_alloc() {
         CHILD_VEC_ALLOCS.fetch_add(1, Ordering::Relaxed);
