@@ -56,7 +56,7 @@ pub use dynamic::DynamicMatcher;
 pub(crate) use pattern::strip_whole_pattern_flag_wrapper;
 pub use plan::{check_standalone_regex_hostable, scanner_plan, ScannerPlan, UnlessEntry};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use dfa::DfaScanner;
 use scanner::Scanner;
@@ -123,6 +123,24 @@ fn token_value(value: &str, mode: TokenValueMode) -> String {
         }
         TokenValueMode::Span => String::new(),
     }
+}
+
+/// Dense per-terminal-id `%ignore` flags (indexed by `SymbolId::index()`): the
+/// per-token ignore check is an array read, not a SipHash set probe (perf spike
+/// 2026-07-01). Sized to cover both the terminal ids and the ignore ids.
+fn dense_ignore(conf: &LexerConf) -> Vec<bool> {
+    let max = conf
+        .terminals
+        .iter()
+        .map(|(id, _)| id.index())
+        .chain(conf.ignore.iter().map(|id| id.index()))
+        .max()
+        .unwrap_or(0);
+    let mut ignore = vec![false; max + 1];
+    for id in &conf.ignore {
+        ignore[id.index()] = true;
+    }
+    ignore
 }
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -193,12 +211,22 @@ impl LexerConf {
         self
     }
 
-    /// id → name map for token display.
-    fn names(&self) -> HashMap<SymbolId, String> {
-        self.terminals
+    /// id → name table for token display. Dense (indexed by `SymbolId::index()`)
+    /// so the per-token name lookup is an array read, not a SipHash map probe
+    /// (perf spike 2026-07-01) — terminal ids sit in `[0, n_terminals)` by
+    /// construction (`intern.rs`).
+    fn names(&self) -> Vec<String> {
+        let max = self
+            .terminals
             .iter()
-            .map(|(id, t)| (*id, t.name.clone()))
-            .collect()
+            .map(|(id, _)| id.index())
+            .max()
+            .unwrap_or(0);
+        let mut names = vec![String::new(); max + 1];
+        for (id, t) in &self.terminals {
+            names[id.index()] = t.name.clone();
+        }
+        names
     }
 }
 
@@ -262,8 +290,11 @@ impl ScannerBackend {
 /// Scans the whole input with a single combined regex over all terminals.
 pub struct BasicLexer {
     scanner: ScannerBackend,
-    names: HashMap<SymbolId, String>,
-    ignore: HashSet<SymbolId>,
+    names: Vec<String>,
+    /// Dense per-terminal-id ignore flags (indexed by `SymbolId::index()`), so
+    /// the per-token `%ignore` check is an array read, not a SipHash set probe
+    /// (perf spike 2026-07-01).
+    ignore: Vec<bool>,
 }
 
 impl BasicLexer {
@@ -274,7 +305,7 @@ impl BasicLexer {
         Ok(BasicLexer {
             scanner,
             names: conf.names(),
-            ignore: conf.ignore.iter().copied().collect(),
+            ignore: dense_ignore(conf),
         })
     }
 
@@ -349,18 +380,18 @@ impl BasicLexer {
         let start_line = cur.line;
         let start_col = cur.col;
         cur.feed(value);
-        if self.ignore.contains(&id) {
+        if self.is_ignored(id) {
             return None;
         }
         Some(Token {
             type_id: id,
-            type_: self.names[&id].clone(),
+            type_: self.names[id.index()].clone(),
             value: token_value(value, mode),
             line: start_line,
             column: start_col,
             end_line: cur.line,
             end_column: cur.col,
-            start_pos,
+            start_pos: start_pos,
             end_pos: cur.char_pos,
         })
     }
@@ -407,13 +438,13 @@ impl BasicLexer {
                 cur.feed(value);
                 Ok(Token {
                     type_id: id,
-                    type_: self.names[&id].clone(),
+                    type_: self.names[id.index()].clone(),
                     value: token_value(value, TokenValueMode::Owned),
                     line: start_line,
                     column: start_col,
                     end_line: cur.line,
                     end_column: cur.col,
-                    start_pos,
+                    start_pos: start_pos,
                     end_pos: cur.char_pos,
                 })
             }
@@ -425,7 +456,7 @@ impl BasicLexer {
     /// Mirrors [`ContextualLexer::is_ignored`](ContextualLexer::is_ignored) for the
     /// lazy basic-recovering source.
     pub fn is_ignored(&self, id: SymbolId) -> bool {
-        self.ignore.contains(&id)
+        self.ignore.get(id.index()).copied().unwrap_or(false)
     }
 
     /// The span-emitting analog of [`Lexer::lex`]: eager whole-stream lexing that
@@ -490,7 +521,10 @@ impl Lexer for BasicLexer {
 pub struct ContextualLexer {
     /// LALR state id → index into `scanners`. States whose terminal sets are
     /// equal map to the same index. State 0 is the root (fallback) entry.
-    state_to_scanner: HashMap<usize, usize>,
+    /// Dense parser-state → scanner-slot table (`u32::MAX` = no scanner for that
+    /// state), so the per-token scanner lookup is an array read, not a SipHash map
+    /// probe (perf spike 2026-07-01). Parser states are dense `[0, n_states)`.
+    state_to_scanner: Vec<u32>,
     /// One entry per distinct terminal set, built lazily on first use.
     scanners: Vec<LazyScanner>,
     /// The root (fallback) scanner over the **full** terminal set, built lazily on
@@ -504,8 +538,9 @@ pub struct ContextualLexer {
     terminals: HashMap<SymbolId, TerminalDef>,
     global_flags: u32,
     backend: LexerBackend,
-    names: HashMap<SymbolId, String>,
-    ignore: HashSet<SymbolId>,
+    names: Vec<String>,
+    /// Dense per-terminal-id ignore flags — see [`BasicLexer::ignore`].
+    ignore: Vec<bool>,
 }
 
 /// A per-terminal-set scanner slot, built on first use. Single-threaded by
@@ -592,7 +627,7 @@ impl ContextualLexer {
 
         let mut key_to_idx: HashMap<Vec<SymbolId>, usize> = HashMap::new();
         let mut scanners: Vec<LazyScanner> = Vec::new();
-        let mut state_to_scanner = HashMap::new();
+        let mut state_to_scanner: Vec<u32> = Vec::new();
         for (state_id, valid_ids) in state_terminals {
             let mut ids: Vec<SymbolId> = valid_ids
                 .iter()
@@ -612,7 +647,10 @@ impl ContextualLexer {
                 });
                 scanners.len() - 1
             });
-            state_to_scanner.insert(*state_id, idx);
+            if state_to_scanner.len() <= *state_id {
+                state_to_scanner.resize(*state_id + 1, u32::MAX);
+            }
+            state_to_scanner[*state_id] = idx as u32;
         }
 
         Ok(ContextualLexer {
@@ -623,13 +661,13 @@ impl ContextualLexer {
             global_flags: conf.global_flags,
             backend: conf.backend,
             names: conf.names(),
-            ignore: conf.ignore.iter().copied().collect(),
+            ignore: dense_ignore(conf),
         })
     }
 
     #[inline]
     pub fn is_ignored(&self, id: SymbolId) -> bool {
-        self.ignore.contains(&id)
+        self.ignore.get(id.index()).copied().unwrap_or(false)
     }
 
     /// Build a [`Token`] for a `(id, value)` the scanner matched starting at byte
@@ -662,14 +700,14 @@ impl ContextualLexer {
         }
         Token {
             type_id: id,
-            type_: self.names[&id].clone(),
+            type_: self.names[id.index()].clone(),
             value: token_value(value, mode),
-            line,
+            line: line,
             column: col,
-            end_line,
-            end_column,
+            end_line: end_line,
+            end_column: end_column,
             start_pos: char_pos,
-            end_pos: char_pos + nchars,
+            end_pos: (char_pos + nchars),
         }
     }
 
@@ -687,16 +725,20 @@ impl ContextualLexer {
         col: usize,
         mode: TokenValueMode,
     ) -> Result<Option<Token>, ParseError> {
-        let scanner = match self
-            .state_to_scanner
-            .get(&state)
-            .or_else(|| self.state_to_scanner.get(&0))
-        {
-            Some(idx) => {
-                self.scanners[*idx].get_or_build(&self.terminals, self.global_flags, self.backend)
-            }
-            None => return Ok(None),
+        let slot = match self.state_to_scanner.get(state).copied() {
+            Some(idx) if idx != u32::MAX => idx,
+            // No scanner recorded for this state: fall back to state 0's
+            // scanner (the pre-spike `HashMap` fallback, preserved verbatim).
+            _ => match self.state_to_scanner.first().copied() {
+                Some(idx) if idx != u32::MAX => idx,
+                _ => return Ok(None),
+            },
         };
+        let scanner = self.scanners[slot as usize].get_or_build(
+            &self.terminals,
+            self.global_flags,
+            self.backend,
+        );
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
             return Ok(Some(self.build_token(id, value, char_pos, line, col, mode)));

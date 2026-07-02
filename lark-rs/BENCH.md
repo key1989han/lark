@@ -223,6 +223,30 @@ allocation-bound, not algorithm-bound — now **measured**, not assumed (see bel
 This harness is what makes that headroom measurable and turns each future
 optimization into a tracked delta.
 
+### Hot-path allocation/dispatch pass (2026-07-01, E1/E2/E3/E5)
+
+A profile-first pass on the LALR hot path (`docs/notes/perf-spike-2026-07-01.md`)
+removed the per-token clones (the token was materialized 3×), the four per-token
+SipHash probes (terminal name, state→scanner, `%ignore`, `unless` — all now dense
+arrays), the per-reduction `drain().collect()`, and the per-reduction child-buffer
+growth reallocs. All engine-internal; no public type changed. Measured back-to-back
+against `master` on one shared box (same caveat — **only ratios travel**), `min_ns`:
+
+| workload | master | after | ratio |
+|----------|-------:|------:|------:|
+| parse json_small  | 60.8 µs | 42.3 µs | **1.44×** |
+| parse json_medium | 1.46 ms | 0.93 ms | **1.58×** |
+| parse json_large  | 20.24 ms | 11.73 ms | **1.73×** |
+| parse arith_small | 12.7 µs | 7.2 µs | **1.76×** |
+| parse arith_large | 791 µs | 404 µs | **1.96×** |
+
+Geomean ~1.68× on the synthetic LALR workloads; the fuller spike also measured
+1.44–1.71× on the wild-bank real-world LALR grammars. The one remaining public-
+surface lever — `u32` positions shrinking the value-stack element 264 → ~168 B —
+is escalated separately (ADR-0040). The `examples/parse_floor.rs` NullBuilder
+instrument shows ~47–60% of `parse()` is still output materialization: the target
+for the tape/arena backends (#242/#243).
+
 ## Cross-engine end-to-end: JSON / Python / SQL / NL-CYK (issues #50, #87)
 
 `cargo bench --bench vs_python_lark` is the **cross-engine comparison** — the

@@ -73,6 +73,23 @@ pub trait TokenSource {
     /// of input, yields the synthetic `$END` token.
     fn peek(&mut self, state: usize) -> Result<Token, SourceError>;
 
+    /// The current token's terminal id — the only field the LALR dispatch loop
+    /// needs per action lookup. Default: full peek (a clone on caching sources);
+    /// the hot sources override this to read the cached token in place, so the
+    /// batch driver's REDUCE loop never clones a token (perf spike 2026-07-01).
+    fn peek_type(&mut self, state: usize) -> Result<SymbolId, SourceError> {
+        Ok(self.peek(state)?.type_id)
+    }
+
+    /// Consume the current token and return it **by move** (called on SHIFT by the
+    /// batch driver). Default: clone-peek + advance, correct for every source; the
+    /// hot sources override it to hand the cached token out without a clone.
+    fn take_current(&mut self, state: usize) -> Result<Token, SourceError> {
+        let tok = self.peek(state)?;
+        self.advance();
+        Ok(tok)
+    }
+
     /// Consume the current token (called on SHIFT).
     fn advance(&mut self);
 
@@ -121,6 +138,20 @@ impl TokenSource for PreLexed {
             self.current = Some(self.tokens.next().unwrap_or_else(Token::end));
         }
         Ok(self.current.clone().unwrap())
+    }
+
+    fn peek_type(&mut self, _state: usize) -> Result<SymbolId, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.tokens.next().unwrap_or_else(Token::end));
+        }
+        Ok(self.current.as_ref().unwrap().type_id)
+    }
+
+    fn take_current(&mut self, _state: usize) -> Result<Token, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.tokens.next().unwrap_or_else(Token::end));
+        }
+        Ok(self.current.take().unwrap())
     }
 
     fn advance(&mut self) {
@@ -254,6 +285,24 @@ impl<'a> TokenSource for Contextual<'a> {
             self.current = Some(self.lex_next(state)?);
         }
         Ok(self.current.clone().unwrap())
+    }
+
+    fn peek_type(&mut self, state: usize) -> Result<SymbolId, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.lex_next(state)?);
+        }
+        Ok(self.current.as_ref().unwrap().type_id)
+    }
+
+    fn take_current(&mut self, state: usize) -> Result<Token, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.lex_next(state)?);
+        }
+        let tok = self.current.take().unwrap();
+        // Advance by the token's char span (`end_pos - start_pos`), not
+        // `value.len()`: a span token (C8.1 #582) carries no value bytes.
+        self.state.advance_by_chars(token_char_len(&tok));
+        Ok(tok)
     }
 
     fn advance(&mut self) {
@@ -535,16 +584,19 @@ impl<'a, S: TokenSource> PostlexContextual<'a, S> {
     }
 }
 
-impl<S: TokenSource> TokenSource for PostlexContextual<'_, S> {
-    fn peek(&mut self, state: usize) -> Result<Token, SourceError> {
-        if let Some(tok) = &self.current {
-            return Ok(tok.clone());
+impl<'a, S: TokenSource> PostlexContextual<'a, S> {
+    /// Ensure `self.current` holds the next token to offer (the shared fill behind
+    /// `peek`/`peek_type`/`take_current`, perf spike 2026-07-01 — one materialization,
+    /// no per-call clone).
+    fn fill(&mut self, state: usize) -> Result<(), SourceError> {
+        if self.current.is_some() {
+            return Ok(());
         }
         loop {
             // Serve any token the indenter has already queued.
             if let Some(tok) = self.stream.pop() {
-                self.current = Some(tok.clone());
-                return Ok(tok);
+                self.current = Some(tok);
+                return Ok(());
             }
             // Queue empty. If the inner lexer is exhausted, flush trailing DEDENTs
             // once (they land before `$END`), then serve the held-back `$END`.
@@ -554,20 +606,35 @@ impl<S: TokenSource> TokenSource for PostlexContextual<'_, S> {
                     self.finished = true;
                     continue;
                 }
-                let end = end.clone();
                 self.current = Some(end.clone());
-                return Ok(end);
+                return Ok(());
             }
             // Pull the next real token from the contextual lexer at the current
             // parser state, advancing the inner stream past it.
-            let tok = self.inner.peek(state)?;
-            self.inner.advance();
+            let tok = self.inner.take_current(state)?;
             if tok.type_id == SymbolId::END {
                 self.end_token = Some(tok);
             } else {
                 self.stream.feed(tok).map_err(SourceError::Postlex)?;
             }
         }
+    }
+}
+
+impl<S: TokenSource> TokenSource for PostlexContextual<'_, S> {
+    fn peek(&mut self, state: usize) -> Result<Token, SourceError> {
+        self.fill(state)?;
+        Ok(self.current.clone().unwrap())
+    }
+
+    fn peek_type(&mut self, state: usize) -> Result<SymbolId, SourceError> {
+        self.fill(state)?;
+        Ok(self.current.as_ref().unwrap().type_id)
+    }
+
+    fn take_current(&mut self, state: usize) -> Result<Token, SourceError> {
+        self.fill(state)?;
+        Ok(self.current.take().unwrap())
     }
 
     fn advance(&mut self) {
