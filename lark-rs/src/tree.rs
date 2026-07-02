@@ -4,6 +4,46 @@ use std::fmt;
 
 use crate::grammar::intern::SymbolId;
 
+/// The integer width source positions are **stored** in (ADR-0040). It is a private
+/// storage detail, never part of the public surface: every accessor
+/// ([`Token::line`], [`Meta::start_pos`], …) returns `usize` regardless of this
+/// width, so switching it neither changes a public type nor breaks a caller.
+///
+/// Default `u32` — halves the position payload of every `Token`/`Meta` moved through
+/// the parser's value stack vs `usize` (the stack element `GSlot<Child>` shrinks
+/// 264 → ~168 bytes; `Option<u32>` is 8 B where `Option<usize>` is 16 B), at the
+/// cost of capping positions at `u32::MAX` — and positions are *character* indices
+/// (#278), so that is ~4 GiB of ASCII-range input, more for multibyte. The
+/// **`wide-positions`** feature widens it to `u64`, lifting that bound and restoring
+/// the pre-ADR-0040 layout, for the rare consumer parsing such inputs (e.g. over the
+/// zero-copy span backend). The
+/// feature is additive-safe: it only enlarges private storage, so unifying it across
+/// a dependency graph can never break a caller (accessors still return `usize`).
+#[cfg(not(feature = "wide-positions"))]
+pub(crate) type PosInt = u32;
+#[cfg(feature = "wide-positions")]
+pub(crate) type PosInt = u64;
+
+/// Narrow a `usize` source position into the private [`PosInt`] storage, asserting
+/// (in debug builds) that it fits (ADR-0040). This is the loud tripwire for the
+/// default `u32` build's 4 GiB (`u32::MAX`) input ceiling: rather than silently
+/// truncate a position past the ceiling, a debug build panics with an actionable
+/// message. Compiles to a bare `as` cast in release (the `debug_assert!` is elided),
+/// so the hot path pays nothing. Under `wide-positions` (`u64`) the bound is
+/// `usize`-wide, so the assert never fires.
+#[inline]
+pub(crate) fn checked_pos(v: usize) -> PosInt {
+    debug_assert!(
+        v <= PosInt::MAX as usize,
+        "source position {v} exceeds the {}-bit position width (max {}); \
+         positions are character indices, so the default u32 caps at ~4 GiB of \
+         ASCII-range input — enable the `wide-positions` cargo feature for larger",
+        PosInt::BITS,
+        PosInt::MAX
+    );
+    v as PosInt
+}
+
 /// A positioned token from the lexer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Token {
@@ -15,12 +55,15 @@ pub struct Token {
     pub type_: String,
     /// The matched text.
     pub value: String,
-    pub line: usize,
-    pub column: usize,
-    pub end_line: usize,
-    pub end_column: usize,
-    pub start_pos: usize,
-    pub end_pos: usize,
+    // Source positions. Stored in `PosInt` (private width, ADR-0040) and exposed
+    // only through the `usize`-returning accessors below, so the storage width is
+    // never part of the public surface.
+    pub(crate) line: PosInt,
+    pub(crate) column: PosInt,
+    pub(crate) end_line: PosInt,
+    pub(crate) end_column: PosInt,
+    pub(crate) start_pos: PosInt,
+    pub(crate) end_pos: PosInt,
 }
 
 impl Token {
@@ -46,13 +89,69 @@ impl Token {
     }
 
     pub fn with_position(mut self, line: usize, col: usize, start: usize, end: usize) -> Self {
-        self.line = line;
-        self.column = col;
-        self.end_line = line; // updated by lexer for multi-line tokens
-        self.end_column = col + (end - start);
-        self.start_pos = start;
-        self.end_pos = end;
+        self.line = checked_pos(line);
+        self.column = checked_pos(col);
+        self.end_line = checked_pos(line); // updated by lexer for multi-line tokens
+        self.end_column = checked_pos(col + (end - start));
+        self.start_pos = checked_pos(start);
+        self.end_pos = checked_pos(end);
         self
+    }
+
+    /// Set all six positions explicitly, including a distinct `end_line`/`end_column`
+    /// for a multi-line token — the general form of [`with_position`](Self::with_position),
+    /// which can only derive a single-line end. Public because the position fields are
+    /// `pub(crate)` (ADR-0040), so external callers construct a fully-positioned token
+    /// through this rather than a struct literal. Positions are checked against the
+    /// storage width (`checked_pos`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_full_position(
+        mut self,
+        line: usize,
+        column: usize,
+        end_line: usize,
+        end_column: usize,
+        start_pos: usize,
+        end_pos: usize,
+    ) -> Self {
+        self.line = checked_pos(line);
+        self.column = checked_pos(column);
+        self.end_line = checked_pos(end_line);
+        self.end_column = checked_pos(end_column);
+        self.start_pos = checked_pos(start_pos);
+        self.end_pos = checked_pos(end_pos);
+        self
+    }
+
+    /// 1-based line of the token's first character.
+    #[inline]
+    pub fn line(&self) -> usize {
+        self.line as usize
+    }
+    /// 1-based column of the token's first character.
+    #[inline]
+    pub fn column(&self) -> usize {
+        self.column as usize
+    }
+    /// 1-based line of the character after the token.
+    #[inline]
+    pub fn end_line(&self) -> usize {
+        self.end_line as usize
+    }
+    /// 1-based column of the character after the token.
+    #[inline]
+    pub fn end_column(&self) -> usize {
+        self.end_column as usize
+    }
+    /// Character offset of the token's start (Python parity, #278).
+    #[inline]
+    pub fn start_pos(&self) -> usize {
+        self.start_pos as usize
+    }
+    /// Character offset one past the token's end.
+    #[inline]
+    pub fn end_pos(&self) -> usize {
+        self.end_pos as usize
     }
 }
 
@@ -65,17 +164,83 @@ impl fmt::Display for Token {
 /// Source position metadata attached to a `Tree` node.
 #[derive(Debug, Clone, Default)]
 pub struct Meta {
-    pub line: Option<usize>,
-    pub column: Option<usize>,
-    pub end_line: Option<usize>,
-    pub end_column: Option<usize>,
-    pub start_pos: Option<usize>,
-    pub end_pos: Option<usize>,
+    // Stored in `PosInt` (private width, ADR-0040); exposed via the `usize`-returning
+    // accessors below.
+    pub(crate) line: Option<PosInt>,
+    pub(crate) column: Option<PosInt>,
+    pub(crate) end_line: Option<PosInt>,
+    pub(crate) end_column: Option<PosInt>,
+    pub(crate) start_pos: Option<PosInt>,
+    pub(crate) end_pos: Option<PosInt>,
     /// True when the rule produced zero tokens (empty match).
     pub empty: bool,
 }
 
 impl Meta {
+    /// A positionless (`empty = true`) meta — no span. The public constructor for the
+    /// "no position" case, since the fields are `pub(crate)` (ADR-0040).
+    pub fn empty() -> Self {
+        Meta {
+            empty: true,
+            ..Meta::default()
+        }
+    }
+
+    /// Build a fully-positioned meta (`empty = false`) from explicit `usize`
+    /// positions. Public because the position fields are `pub(crate)` (ADR-0040), so
+    /// external callers construct a positioned meta through this rather than a struct
+    /// literal. Positions are checked against the storage width (`checked_pos`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_positions(
+        line: usize,
+        column: usize,
+        end_line: usize,
+        end_column: usize,
+        start_pos: usize,
+        end_pos: usize,
+    ) -> Self {
+        Meta {
+            line: Some(checked_pos(line)),
+            column: Some(checked_pos(column)),
+            end_line: Some(checked_pos(end_line)),
+            end_column: Some(checked_pos(end_column)),
+            start_pos: Some(checked_pos(start_pos)),
+            end_pos: Some(checked_pos(end_pos)),
+            empty: false,
+        }
+    }
+
+    /// 1-based line of the node's first positioned child, if any.
+    #[inline]
+    pub fn line(&self) -> Option<usize> {
+        self.line.map(|v| v as usize)
+    }
+    /// 1-based column of the node's first positioned child, if any.
+    #[inline]
+    pub fn column(&self) -> Option<usize> {
+        self.column.map(|v| v as usize)
+    }
+    /// 1-based line after the node's last positioned child, if any.
+    #[inline]
+    pub fn end_line(&self) -> Option<usize> {
+        self.end_line.map(|v| v as usize)
+    }
+    /// 1-based column after the node's last positioned child, if any.
+    #[inline]
+    pub fn end_column(&self) -> Option<usize> {
+        self.end_column.map(|v| v as usize)
+    }
+    /// Character offset of the node's start, if any.
+    #[inline]
+    pub fn start_pos(&self) -> Option<usize> {
+        self.start_pos.map(|v| v as usize)
+    }
+    /// Character offset one past the node's end, if any.
+    #[inline]
+    pub fn end_pos(&self) -> Option<usize> {
+        self.end_pos.map(|v| v as usize)
+    }
+
     pub fn from_children(children: &[Child]) -> Self {
         let mut meta = Meta::default();
         // Propagate position from first/last tokens
@@ -109,42 +274,42 @@ impl Meta {
     }
 }
 
-fn child_line(c: &Child) -> Option<usize> {
+fn child_line(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) if t.line > 0 => Some(t.line),
         Child::Tree(t) => t.meta.line,
         _ => None,
     }
 }
-fn child_column(c: &Child) -> Option<usize> {
+fn child_column(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) if t.column > 0 => Some(t.column),
         Child::Tree(t) => t.meta.column,
         _ => None,
     }
 }
-fn child_start(c: &Child) -> Option<usize> {
+fn child_start(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) => Some(t.start_pos),
         Child::Tree(t) => t.meta.start_pos,
         Child::None => None,
     }
 }
-fn child_end_line(c: &Child) -> Option<usize> {
+fn child_end_line(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) if t.end_line > 0 => Some(t.end_line),
         Child::Tree(t) => t.meta.end_line,
         _ => None,
     }
 }
-fn child_end_column(c: &Child) -> Option<usize> {
+fn child_end_column(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) if t.end_column > 0 => Some(t.end_column),
         Child::Tree(t) => t.meta.end_column,
         _ => None,
     }
 }
-fn child_end(c: &Child) -> Option<usize> {
+fn child_end(c: &Child) -> Option<PosInt> {
     match c {
         Child::Token(t) => Some(t.end_pos),
         Child::Tree(t) => t.meta.end_pos,

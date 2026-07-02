@@ -107,7 +107,7 @@ fn issue_402_minimal_repro_spans_filtered_parens() {
     let lark = Lark::new(g, opts).expect("builds");
     let tree = lark.parse("( cafX )").expect("parses");
     let t = tree.as_tree().expect("a tree root");
-    assert_eq!((t.meta.start_pos, t.meta.end_pos), (Some(0), Some(8)));
+    assert_eq!((t.meta.start_pos(), t.meta.end_pos()), (Some(0), Some(8)));
 }
 
 /// `propagate_positions=false` (the default) must leave the prior behavior intact:
@@ -127,7 +127,7 @@ fn propagate_positions_off_keeps_post_filter_span() {
     let lark = Lark::new(g, opts).expect("builds");
     let tree = lark.parse("( cafX )").expect("parses");
     let t = tree.as_tree().expect("a tree root");
-    assert_eq!((t.meta.start_pos, t.meta.end_pos), (Some(2), Some(6)));
+    assert_eq!((t.meta.start_pos(), t.meta.end_pos()), (Some(2), Some(6)));
 }
 
 // ─── Cross-engine empty/nullable-production span agreement (#500) ─────────────
@@ -234,12 +234,12 @@ fn span_shape(tree: &Tree, out: &mut Vec<SpanShape>) {
     if tree.data != "_ambig" {
         out.push((
             tree.data.clone(),
-            tree.meta.line,
-            tree.meta.column,
-            tree.meta.end_line,
-            tree.meta.end_column,
-            tree.meta.start_pos,
-            tree.meta.end_pos,
+            tree.meta.line(),
+            tree.meta.column(),
+            tree.meta.end_line(),
+            tree.meta.end_column(),
+            tree.meta.start_pos(),
+            tree.meta.end_pos(),
             tree.meta.empty,
         ));
     }

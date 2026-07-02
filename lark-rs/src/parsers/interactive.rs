@@ -142,8 +142,8 @@ impl<'a> InteractiveParser<'a> {
                 return Err(ParseError::UnexpectedToken {
                     token: token.value.clone(),
                     token_type: token.type_.clone(),
-                    line: token.line,
-                    col: token.column,
+                    line: token.line as usize,
+                    col: token.column as usize,
                     expected: self.accepts(),
                 })
             }
@@ -295,9 +295,9 @@ impl<'a> InteractiveParser<'a> {
                             // byte cursor by the matched span's byte length, the char
                             // cursor to `end_pos`.
                             self.pos += token.value.len();
-                            self.char_pos = token.end_pos;
-                            self.line = token.end_line;
-                            self.col = token.end_column;
+                            self.char_pos = token.end_pos as usize;
+                            self.line = token.end_line as usize;
+                            self.col = token.end_column as usize;
                             if lexer.is_ignored(token.type_id) {
                                 continue;
                             }
@@ -328,15 +328,15 @@ impl<'a> InteractiveParser<'a> {
                         // Ignored terminal (whitespace, comment): advance and continue.
                         Ok(Some(token)) if lexer.is_ignored(token.type_id) => {
                             self.pos += token.value.len();
-                            self.char_pos = token.end_pos;
-                            self.line = token.end_line;
-                            self.col = token.end_column;
+                            self.char_pos = token.end_pos as usize;
+                            self.line = token.end_line as usize;
+                            self.col = token.end_column as usize;
                         }
                         Ok(Some(token)) => {
                             self.pos += token.value.len();
-                            self.char_pos = token.end_pos;
-                            self.line = token.end_line;
-                            self.col = token.end_column;
+                            self.char_pos = token.end_pos as usize;
+                            self.line = token.end_line as usize;
+                            self.col = token.end_column as usize;
                             return Ok(token);
                         }
                         // Per-state miss: try the root (full-terminal) scanner as a
@@ -366,9 +366,9 @@ impl<'a> InteractiveParser<'a> {
                                 self.col,
                             ) {
                                 self.pos += token.value.len();
-                                self.char_pos = token.end_pos;
-                                self.line = token.end_line;
-                                self.col = token.end_column;
+                                self.char_pos = token.end_pos as usize;
+                                self.line = token.end_line as usize;
+                                self.col = token.end_column as usize;
                                 if lexer.is_ignored(token.type_id) {
                                     continue;
                                 }

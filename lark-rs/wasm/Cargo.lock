@@ -93,8 +93,10 @@ dependencies = [
  "indexmap",
  "regex",
  "regex-automata",
+ "regex-syntax",
  "smallvec",
  "thiserror",
+ "unicode-ident",
 ]
 
 [[package]]

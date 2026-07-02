@@ -778,8 +778,8 @@ impl ParserStack {
                 .ok_or_else(|| ParseError::UnexpectedToken {
                     token: at.value.clone(),
                     token_type: table.symbols.name(rule.origin).to_string(),
-                    line: at.line,
-                    col: at.column,
+                    line: at.line as usize,
+                    col: at.column as usize,
                     expected: vec![table.symbols.name(rule.origin).to_string()],
                 })?;
         self.state_stack.push(next_state as usize);
@@ -1154,8 +1154,8 @@ impl LalrParser {
                                 return Err(ParseError::UnexpectedToken {
                                     token: token.value.clone(),
                                     token_type: self.table.symbols.name(rule.origin).to_string(),
-                                    line: token.line,
-                                    col: token.column,
+                                    line: token.line as usize,
+                                    col: token.column as usize,
                                     expected: vec![self
                                         .table
                                         .symbols

@@ -64,7 +64,7 @@ use scanner::Scanner;
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::TerminalDef;
-use crate::tree::Token;
+use crate::tree::{checked_pos, Token};
 
 /// Account the forward-skip cost of one per-position scan attempt for the
 /// deterministic lexer-scaling gate ([`crate::perf::lexer_scan_steps`]).
@@ -387,12 +387,12 @@ impl BasicLexer {
             type_id: id,
             type_: self.names[id.index()].clone(),
             value: token_value(value, mode),
-            line: start_line,
-            column: start_col,
-            end_line: cur.line,
-            end_column: cur.col,
-            start_pos: start_pos,
-            end_pos: cur.char_pos,
+            line: checked_pos(start_line),
+            column: checked_pos(start_col),
+            end_line: checked_pos(cur.line),
+            end_column: checked_pos(cur.col),
+            start_pos: checked_pos(start_pos),
+            end_pos: checked_pos(cur.char_pos),
         })
     }
 
@@ -440,12 +440,12 @@ impl BasicLexer {
                     type_id: id,
                     type_: self.names[id.index()].clone(),
                     value: token_value(value, TokenValueMode::Owned),
-                    line: start_line,
-                    column: start_col,
-                    end_line: cur.line,
-                    end_column: cur.col,
-                    start_pos: start_pos,
-                    end_pos: cur.char_pos,
+                    line: checked_pos(start_line),
+                    column: checked_pos(start_col),
+                    end_line: checked_pos(cur.line),
+                    end_column: checked_pos(cur.col),
+                    start_pos: checked_pos(start_pos),
+                    end_pos: checked_pos(cur.char_pos),
                 })
             }
             None => Err(()),
@@ -702,12 +702,12 @@ impl ContextualLexer {
             type_id: id,
             type_: self.names[id.index()].clone(),
             value: token_value(value, mode),
-            line: line,
-            column: col,
-            end_line: end_line,
-            end_column: end_column,
-            start_pos: char_pos,
-            end_pos: (char_pos + nchars),
+            line: checked_pos(line),
+            column: checked_pos(col),
+            end_line: checked_pos(end_line),
+            end_column: checked_pos(end_column),
+            start_pos: checked_pos(char_pos),
+            end_pos: checked_pos(char_pos + nchars),
         }
     }
 

@@ -26,7 +26,7 @@ use crate::tree::Token;
 /// (C8.1 #582).
 #[inline]
 fn token_char_len(tok: &Token) -> usize {
-    tok.end_pos - tok.start_pos
+    (tok.end_pos - tok.start_pos) as usize
 }
 
 /// The token source could not tokenize the input at the current position.

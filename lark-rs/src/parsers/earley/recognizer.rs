@@ -101,7 +101,7 @@ impl EarleyParser {
                 .last()
                 .map(|t| (t.end_line.max(t.line), t.end_column.max(t.column)))
                 .unwrap_or((1, 1));
-            ParseError::unexpected_eof(line, col, vec![])
+            ParseError::unexpected_eof(line as usize, col as usize, vec![])
         })
     }
 

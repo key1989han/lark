@@ -31,6 +31,14 @@ exclude = ["python", "wasm"]
 # with `--features perf-counters` to read `lark_rs::perf` (the noise-free
 # super-linearity regression net, `tests/test_earley_scaling.rs`).
 perf-counters = []
+# Widen the private source-position storage from u32 to u64 (ADR-0040). Default OFF:
+# positions are stored as u32, halving the Token/Meta position payload (the hot-path
+# memcpy win) at the cost of a 4 GiB (u32::MAX) input bound. Turn this on ONLY to
+# parse >4 GiB inputs — it restores the pre-ADR-0040 layout. Additive-safe: it only
+# enlarges private storage; the public accessors return `usize` either way, so
+# enabling it anywhere in a dependency graph can never change a public type or break
+# a caller. See `lark_rs::tree::PosInt`.
+wide-positions = []
 # EXPERIMENTAL, default OFF (ADR-0029 fork 3): the zero-copy `SpanTree<'i>` output
 # backend (C8, #233) and its `Lark::parse_span` entry point. Gated because the
 # borrowed-span surface is *not stabilised* until its projection + counter gates are
