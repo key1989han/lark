@@ -46,7 +46,7 @@
 //! does.
 
 use crate::grammar::intern::{CompiledRule, SymbolId, SymbolTable};
-use crate::tree::{Child, Meta, ParseTree, Token, Tree};
+use crate::tree::{checked_pos, Child, Meta, ParseTree, Token, Tree};
 
 use super::tree_builder::{OutputBuilder, OutputContext};
 
@@ -107,12 +107,12 @@ impl<'i, 'g> SpanNode<'i, 'g> {
             // The raw `Meta` a shifted token contributes (all fields present,
             // `empty = false`) — the same shape `meta_from_token` builds.
             SpanNode::Token(t) => Some(Meta {
-                line: Some(t.line as u32),
-                column: Some(t.column as u32),
-                end_line: Some(t.end_line as u32),
-                end_column: Some(t.end_column as u32),
-                start_pos: Some(t.start_pos as u32),
-                end_pos: Some(t.end_pos as u32),
+                line: Some(checked_pos(t.line)),
+                column: Some(checked_pos(t.column)),
+                end_line: Some(checked_pos(t.end_line)),
+                end_column: Some(checked_pos(t.end_column)),
+                start_pos: Some(checked_pos(t.start_pos)),
+                end_pos: Some(checked_pos(t.end_pos)),
                 empty: false,
             }),
             SpanNode::Branch(b) => Some(b.meta.clone()),
@@ -144,12 +144,12 @@ impl<'i, 'g> SpanNode<'i, 'g> {
                 type_id: t.type_id,
                 type_: t.type_name.to_string(),
                 value: t.value.to_string(),
-                line: t.line as u32,
-                column: t.column as u32,
-                end_line: t.end_line as u32,
-                end_column: t.end_column as u32,
-                start_pos: t.start_pos as u32,
-                end_pos: t.end_pos as u32,
+                line: checked_pos(t.line),
+                column: checked_pos(t.column),
+                end_line: checked_pos(t.end_line),
+                end_column: checked_pos(t.end_column),
+                start_pos: checked_pos(t.start_pos),
+                end_pos: checked_pos(t.end_pos),
             }),
             SpanNode::Branch(b) => Child::Tree(Tree {
                 data: b.name.to_string(),

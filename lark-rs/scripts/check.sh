@@ -61,6 +61,15 @@ note "Scaling gates: cargo test --features perf-counters --test test_earley_scal
     --test test_lalr_table_scaling ) \
   || fail "a scaling gate failed — a complexity regression (see the failing test_*_scaling.rs)"
 
+# 2b2. wide-positions gate (ADR-0040) — the u64 storage path (default build tests
+#      u32). `cargo test --all` never sets it; mirror the CI steps, including the
+#      span-tree combination where a missed position cast would surface.
+note "wide-positions gate: cargo test --features wide-positions (+ span-tree/perf-counters test_span_tree)"
+( cd "$LARK_RS_DIR" && cargo test --features wide-positions ) \
+  || fail "wide-positions (u64) gate failed"
+( cd "$LARK_RS_DIR" && cargo test --features "wide-positions span-tree perf-counters" --test test_span_tree ) \
+  || fail "wide-positions + span-tree gate failed"
+
 # 2c. python.lark LALR build gate (#79) — #[ignore]d because the build is slow
 #     (~18s debug), so `cargo test --all` skips it. Matches the CI step.
 note "python.lark LALR build gate: cargo test --lib tests::test_python_lark_builds_under_lalr -- --ignored --exact"

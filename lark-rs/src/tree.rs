@@ -12,9 +12,11 @@ use crate::grammar::intern::SymbolId;
 /// Default `u32` — halves the position payload of every `Token`/`Meta` moved through
 /// the parser's value stack vs `usize` (the stack element `GSlot<Child>` shrinks
 /// 264 → ~168 bytes; `Option<u32>` is 8 B where `Option<usize>` is 16 B), at the
-/// cost of a 4 GiB (`u32::MAX`) input bound. The **`wide-positions`** feature widens
-/// it to `u64`, lifting that bound and restoring the pre-ADR-0040 layout, for the
-/// rare consumer parsing >4 GiB inputs (e.g. over the zero-copy span backend). The
+/// cost of capping positions at `u32::MAX` — and positions are *character* indices
+/// (#278), so that is ~4 GiB of ASCII-range input, more for multibyte. The
+/// **`wide-positions`** feature widens it to `u64`, lifting that bound and restoring
+/// the pre-ADR-0040 layout, for the rare consumer parsing such inputs (e.g. over the
+/// zero-copy span backend). The
 /// feature is additive-safe: it only enlarges private storage, so unifying it across
 /// a dependency graph can never break a caller (accessors still return `usize`).
 #[cfg(not(feature = "wide-positions"))]
@@ -33,8 +35,9 @@ pub(crate) type PosInt = u64;
 pub(crate) fn checked_pos(v: usize) -> PosInt {
     debug_assert!(
         v <= PosInt::MAX as usize,
-        "source position {v} exceeds the {}-bit position width ({} max); \
-         enable the `wide-positions` cargo feature to parse inputs > 4 GiB",
+        "source position {v} exceeds the {}-bit position width (max {}); \
+         positions are character indices, so the default u32 caps at ~4 GiB of \
+         ASCII-range input — enable the `wide-positions` cargo feature for larger",
         PosInt::BITS,
         PosInt::MAX
     );
@@ -95,6 +98,31 @@ impl Token {
         self
     }
 
+    /// Set all six positions explicitly, including a distinct `end_line`/`end_column`
+    /// for a multi-line token — the general form of [`with_position`](Self::with_position),
+    /// which can only derive a single-line end. Public because the position fields are
+    /// `pub(crate)` (ADR-0040), so external callers construct a fully-positioned token
+    /// through this rather than a struct literal. Positions are checked against the
+    /// storage width (`checked_pos`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_full_position(
+        mut self,
+        line: usize,
+        column: usize,
+        end_line: usize,
+        end_column: usize,
+        start_pos: usize,
+        end_pos: usize,
+    ) -> Self {
+        self.line = checked_pos(line);
+        self.column = checked_pos(column);
+        self.end_line = checked_pos(end_line);
+        self.end_column = checked_pos(end_column);
+        self.start_pos = checked_pos(start_pos);
+        self.end_pos = checked_pos(end_pos);
+        self
+    }
+
     /// 1-based line of the token's first character.
     #[inline]
     pub fn line(&self) -> usize {
@@ -149,6 +177,39 @@ pub struct Meta {
 }
 
 impl Meta {
+    /// A positionless (`empty = true`) meta — no span. The public constructor for the
+    /// "no position" case, since the fields are `pub(crate)` (ADR-0040).
+    pub fn empty() -> Self {
+        Meta {
+            empty: true,
+            ..Meta::default()
+        }
+    }
+
+    /// Build a fully-positioned meta (`empty = false`) from explicit `usize`
+    /// positions. Public because the position fields are `pub(crate)` (ADR-0040), so
+    /// external callers construct a positioned meta through this rather than a struct
+    /// literal. Positions are checked against the storage width (`checked_pos`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_positions(
+        line: usize,
+        column: usize,
+        end_line: usize,
+        end_column: usize,
+        start_pos: usize,
+        end_pos: usize,
+    ) -> Self {
+        Meta {
+            line: Some(checked_pos(line)),
+            column: Some(checked_pos(column)),
+            end_line: Some(checked_pos(end_line)),
+            end_column: Some(checked_pos(end_column)),
+            start_pos: Some(checked_pos(start_pos)),
+            end_pos: Some(checked_pos(end_pos)),
+            empty: false,
+        }
+    }
+
     /// 1-based line of the node's first positioned child, if any.
     #[inline]
     pub fn line(&self) -> Option<usize> {

@@ -125,6 +125,20 @@ jobs:
           cargo test --features "span-tree perf-counters"
           --test test_span_tree
 
+      # `wide-positions` widens the private source-position storage u32 -> u64
+      # (ADR-0040). The default build above exercises the u32 path; this gates the
+      # u64 path so the "default narrow, opt-in wide" safety story is actually
+      # tested — including `wide-positions` + `span-tree`, the combination where a
+      # missed cast would otherwise surface (the span backend materializes
+      # positions back into Token/Meta). `cargo test --all` never sets it, so it
+      # must run explicitly.
+      - name: wide-positions gate (u64 storage)
+        run: cargo test --features wide-positions
+      - name: wide-positions + SpanTree gate
+        run: >-
+          cargo test --features "wide-positions span-tree perf-counters"
+          --test test_span_tree
+
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
       # sharing, its repeated `("," X)*` helpers collide as unresolvable R/R). The

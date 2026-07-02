@@ -158,7 +158,10 @@ pub trait OutputBuilder<'i> {
     /// A shifted terminal. The engine hands the lexer's token record (interned
     /// `type_id`, `span`, precomputed positions, and — in this C7 intermediate —
     /// the owned value; ADR-0038 §3) plus the whole `input`, so a span backend can
-    /// borrow `&input[token.start_pos..token.end_pos]`. `ctx` resolves the interned
+    /// borrow the token's text out of `input`. Note `token.start_pos()`/`end_pos()`
+    /// are **character** indices (Python parity, #278), not byte offsets, so slice
+    /// after mapping them to byte offsets (as `SpanTreeBuilder` does); they are not a
+    /// direct `&input[..]` range. `ctx` resolves the interned
     /// terminal id to its Python-side name when the builder needs it. Runs for
     /// *every* shifted terminal — the parse stack always needs a value (this is
     /// engine token materialization, lower-level than Python's *visible* terminal

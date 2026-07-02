@@ -64,7 +64,7 @@ use scanner::Scanner;
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::TerminalDef;
-use crate::tree::{checked_pos, PosInt, Token};
+use crate::tree::{checked_pos, Token};
 
 /// Account the forward-skip cost of one per-position scan attempt for the
 /// deterministic lexer-scaling gate ([`crate::perf::lexer_scan_steps`]).
@@ -702,12 +702,12 @@ impl ContextualLexer {
             type_id: id,
             type_: self.names[id.index()].clone(),
             value: token_value(value, mode),
-            line: line as PosInt,
-            column: col as PosInt,
-            end_line: end_line as PosInt,
-            end_column: end_column as PosInt,
-            start_pos: char_pos as PosInt,
-            end_pos: (char_pos + nchars) as PosInt,
+            line: checked_pos(line),
+            column: checked_pos(col),
+            end_line: checked_pos(end_line),
+            end_column: checked_pos(end_column),
+            start_pos: checked_pos(char_pos),
+            end_pos: checked_pos(char_pos + nchars),
         }
     }
 

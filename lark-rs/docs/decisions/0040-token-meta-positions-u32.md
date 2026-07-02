@@ -74,12 +74,13 @@ under Cargo's additive feature unification.
   bindings and the test suite. (`type_id`, `type_`, `value` stay public fields; only
   the six positions move to accessors.) One-time, then stable regardless of any
   future width change.
-- **Ceiling, and its escape hatch:** default `u32` caps correct positions at 4 GiB
-  (`u32::MAX`) of input; `--features wide-positions` (u64) removes the cap. In
-  practice the default `parse()` builds an owned tree at ~3 allocations/byte, so a
-  4 GiB input needs >12 GB of tree — no realistic full-tree parse approaches the
-  cap; the feature exists mainly for the zero-copy span backend's future large-input
-  use. **A `debug_assert!` at token construction should be added as the tripwire so
+- **Ceiling, and its escape hatch:** default `u32` caps positions at `u32::MAX`.
+  Positions are *character* indices (#278), so that is ~4 GiB of ASCII-range input
+  (more for multibyte) — an approximation, not a byte-exact bound.
+  `--features wide-positions` (u64) removes the cap. In practice the default
+  `parse()` builds an owned tree at ~3 allocations/byte, so an input that large
+  needs tens of GB of tree — no realistic full-tree parse approaches the cap; the
+  feature exists mainly for the zero-copy span backend's future large-input use. **A `debug_assert!` at token construction should be added as the tripwire so
   the cap fails loudly rather than truncating silently** (follow-up within this PR).
 - **Why not `u64` unconditionally:** `Option<u64>` is 16 B (same as today) — it
   would forgo the entire win. The 32-bit width *is* the lever.
