@@ -20,15 +20,6 @@ use crate::lexer::{BasicLexer, ContextualLexer, LexerState, TokenValueMode};
 use crate::postlex::{Indenter, IndenterStream};
 use crate::tree::Token;
 
-/// The number of characters a token spans (`end_pos - start_pos`, both char indices,
-/// #278). Used to advance the lexer cursor independently of `Token.value`, so a
-/// span-emitting (value-less) token advances the same distance an owned one would
-/// (C8.1 #582).
-#[inline]
-fn token_char_len(tok: &Token) -> usize {
-    (tok.end_pos - tok.start_pos) as usize
-}
-
 /// The token source could not tokenize the input at the current position.
 ///
 /// It carries only what the *lexer* knows (the offending character and where it
@@ -168,6 +159,10 @@ pub struct Contextual<'a> {
     lexer: &'a ContextualLexer,
     state: LexerState<'a>,
     current: Option<Token>,
+    /// Matched byte length of `current` — the O(1) cursor-advance distance
+    /// ([`LexerState::advance_past`], perf spike 2026-07-02). The token's own end
+    /// position supplies the rest, so consuming a token re-walks no text.
+    current_nbytes: usize,
     /// Owned vs. span (value-less) token emission (C8.1 #582). `parse_span` uses
     /// [`Self::new_span`] so the lexer allocates no owned `Token.value`.
     mode: TokenValueMode,
@@ -190,6 +185,7 @@ impl<'a> Contextual<'a> {
             lexer,
             state: LexerState::new(text),
             current: None,
+            current_nbytes: 0,
             mode,
         }
     }
@@ -209,43 +205,36 @@ impl<'a> Contextual<'a> {
     /// non-recovering driver renders as `UnexpectedCharacter`
     /// ([`lex_failure`](super::lalr::LalrParser)). Without this fallback the driver
     /// could not distinguish the two cases and mis-classified every state miss.
-    fn lex_next(&mut self, parser_state: usize) -> Result<Token, LexFailure> {
+    fn lex_next(&mut self, parser_state: usize) -> Result<(Token, usize), LexFailure> {
         loop {
             if self.state.is_done() {
-                return Ok(Token::end().with_position(
-                    self.state.line,
-                    self.state.col,
-                    self.state.char_pos,
-                    self.state.char_pos,
+                return Ok((
+                    Token::end().with_position(
+                        self.state.line,
+                        self.state.col,
+                        self.state.char_pos,
+                        self.state.char_pos,
+                    ),
+                    0,
                 ));
             }
-            let matched = match self.mode {
-                TokenValueMode::Owned => self.lexer.next_token(
-                    self.state.text,
-                    self.state.pos,
-                    self.state.char_pos,
-                    parser_state,
-                    self.state.line,
-                    self.state.col,
-                ),
-                // Span (value-less) emission — no owned `Token.value` allocation.
-                TokenValueMode::Span => self.lexer.next_token_span(
-                    self.state.text,
-                    self.state.pos,
-                    self.state.char_pos,
-                    parser_state,
-                    self.state.line,
-                    self.state.col,
-                ),
-            };
+            let matched = self.lexer.next_token_with_mode(
+                self.state.text,
+                self.state.pos,
+                self.state.char_pos,
+                parser_state,
+                self.state.line,
+                self.state.col,
+                self.mode,
+            );
             match matched {
                 // Ignored terminal (whitespace, comment): consume and keep going.
-                // Advance by the token's char span, not `value.len()` — a span token
-                // carries no value bytes (C8.1 #582).
-                Ok(Some(tok)) if self.lexer.is_ignored(tok.type_id) => {
-                    self.state.advance_by_chars(token_char_len(&tok));
+                // O(1) advance off the token's own end position + matched byte
+                // length — no re-walk of the consumed text (perf spike 2026-07-02).
+                Ok(Some((tok, nbytes))) if self.lexer.is_ignored(tok.type_id) => {
+                    self.state.advance_past(&tok, nbytes);
                 }
-                Ok(Some(tok)) => return Ok(tok),
+                Ok(Some((tok, nbytes))) => return Ok((tok, nbytes)),
                 // No scanner for this state, or no terminal valid here: fall back to
                 // the root (full-terminal) scanner. A root match is an
                 // out-of-context-but-valid token — yield it so the parser raises
@@ -264,7 +253,11 @@ impl<'a> Contextual<'a> {
                         self.state.line,
                         self.state.col,
                     ) {
-                        return Ok(tok);
+                        // Root-fallback tokens are Owned-mode, so the matched
+                        // byte length is the value's (only reached on the error
+                        // path — the parser never shifts an out-of-context token).
+                        let nbytes = tok.value.len();
+                        return Ok((tok, nbytes));
                     }
                     let ch = self.state.text[self.state.pos..].chars().next().unwrap();
                     return Err(LexFailure {
@@ -277,39 +270,41 @@ impl<'a> Contextual<'a> {
             }
         }
     }
+
+    /// Ensure `self.current` caches the next token (+ its advance distance).
+    fn fill(&mut self, state: usize) -> Result<(), LexFailure> {
+        if self.current.is_none() {
+            let (tok, nbytes) = self.lex_next(state)?;
+            self.current = Some(tok);
+            self.current_nbytes = nbytes;
+        }
+        Ok(())
+    }
 }
 
 impl<'a> TokenSource for Contextual<'a> {
     fn peek(&mut self, state: usize) -> Result<Token, SourceError> {
-        if self.current.is_none() {
-            self.current = Some(self.lex_next(state)?);
-        }
+        self.fill(state)?;
         Ok(self.current.clone().unwrap())
     }
 
     fn peek_type(&mut self, state: usize) -> Result<SymbolId, SourceError> {
-        if self.current.is_none() {
-            self.current = Some(self.lex_next(state)?);
-        }
+        self.fill(state)?;
         Ok(self.current.as_ref().unwrap().type_id)
     }
 
     fn take_current(&mut self, state: usize) -> Result<Token, SourceError> {
-        if self.current.is_none() {
-            self.current = Some(self.lex_next(state)?);
-        }
+        self.fill(state)?;
         let tok = self.current.take().unwrap();
-        // Advance by the token's char span (`end_pos - start_pos`), not
-        // `value.len()`: a span token (C8.1 #582) carries no value bytes.
-        self.state.advance_by_chars(token_char_len(&tok));
+        // O(1): the token carries its end position; `current_nbytes` is the byte
+        // distance. No re-walk of the consumed text (perf spike 2026-07-02).
+        self.state.advance_past(&tok, self.current_nbytes);
         Ok(tok)
     }
 
     fn advance(&mut self) {
         if let Some(tok) = self.current.take() {
-            // Advance by the token's char span (`end_pos - start_pos`), not
-            // `value.len()`: a span token (C8.1 #582) carries no value bytes.
-            self.state.advance_by_chars(token_char_len(&tok));
+            self.state.advance_past(&tok, self.current_nbytes);
         }
     }
 }
