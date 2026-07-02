@@ -46,6 +46,11 @@ wide-positions = []
 # themselves live behind this feature (projection) plus `perf-counters` (the
 # `tree_nodes_built == 0` / `token_value_string_bytes == 0` proofs).
 span-tree = []
+# EXPERIMENTAL, default OFF, internal-only (#243 C8c, needs-decision): the flat-tape
+# output backend prototype (`Lark::parse_tape`, src/parsers/tape.rs). Appends the
+# whole parse to two flat arrays (O(log n) allocator calls per parse); projection +
+# counter gates in tests/test_tape_tree.rs. Not a public commitment.
+tape-tree = []
 # TEST-ONLY (not a user escape hatch): re-enables the `Regex` reference backend's
 # historical `fancy-regex` side-probes so the whole-lexer differential
 # (tests/test_scanner_differential.rs) has an independent oracle. Default OFF, and

@@ -4,6 +4,8 @@ pub mod interactive;
 pub mod lalr;
 #[cfg(feature = "span-tree")]
 pub mod span_tree;
+#[cfg(feature = "tape-tree")]
+pub mod tape;
 pub mod token_source;
 pub mod tree_builder;
 
@@ -25,6 +27,10 @@ pub use tree_builder::{OutputBuilder, OutputContext};
 // drives.
 #[cfg(feature = "span-tree")]
 pub use span_tree::{SpanBranch, SpanNode, SpanToken, SpanTreeBuilder};
+// The flat-tape backend prototype (#243 C8c): experimental / feature-gated,
+// internal-only pending the needs-decision promotion call.
+#[cfg(feature = "tape-tree")]
+pub use tape::{TapeEntry, TapeTree};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
 use crate::grammar::intern::{SymbolId, SymbolTable};
@@ -721,6 +727,29 @@ impl ParsingFrontend {
         parser
             .run_into(source.as_mut(), start, &mut builder, input)
             .map_err(LarkError::Parse)
+    }
+
+    /// Parse `input` onto a flat tape (#243 C8c prototype) — the tape-backend
+    /// analog of [`parse_span`](Self::parse_span): same span-emitting (value-less)
+    /// token source, same support boundary and typed refusal, but the output is
+    /// appended to two flat arrays instead of one owned node per value.
+    #[cfg(feature = "tape-tree")]
+    pub fn parse_tape<'i, 'g>(
+        &'g self,
+        input: &'i str,
+        start: Option<&str>,
+    ) -> Result<tape::TapeTree<'i, 'g>, LarkError> {
+        let into = self
+            .driver
+            .as_lalr_into()
+            .ok_or_else(parse_into_unsupported)?;
+        let parser = into.parser();
+        let mut builder = tape::TapeBuilder::new();
+        let mut source = into.make_span_source(input).map_err(LarkError::Parse)?;
+        let root = parser
+            .run_into(source.as_mut(), start, &mut builder, input)
+            .map_err(LarkError::Parse)?;
+        Ok(builder.into_tape(input, &parser.table.rules, &parser.table.symbols, root))
     }
 }
 

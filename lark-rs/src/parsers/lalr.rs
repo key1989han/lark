@@ -34,7 +34,7 @@ use super::token_source::{
 };
 use super::tree_builder::{
     accept_value, meta_from_token, shape_reduction, GElem, GSlot, GTag, OutputBuilder,
-    OutputContext, Slot, TreeOutputBuilder,
+    OutputContext, ReduceScratch, Slot, TreeOutputBuilder,
 };
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
@@ -1083,6 +1083,9 @@ impl LalrParser {
         let ctx = OutputContext::new(&self.table.rules, &self.table.symbols);
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<GSlot<B::Value>> = Vec::new();
+        // Recycled shaping buffers (perf spike 2026-07-02): reductions cycle their
+        // child buffers through here instead of the allocator.
+        let mut scratch: ReduceScratch<B::Value> = ReduceScratch::new();
 
         loop {
             let state = *state_stack.last().unwrap();
@@ -1135,6 +1138,7 @@ impl LalrParser {
                             builder,
                             &ctx,
                             self.table.propagate_positions,
+                            &mut scratch,
                         );
                         let top = *state_stack.last().unwrap();
                         let nt_index = (rule.origin.index() - self.table.n_terminals) as u32;

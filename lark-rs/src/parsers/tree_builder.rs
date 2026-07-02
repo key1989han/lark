@@ -714,7 +714,11 @@ fn nones_at_gap(rule: &CompiledRule, gap: usize) -> usize {
 /// Fresh buffers therefore scale with the *node* count (and only nodes whose
 /// first kept child isn't a spliced list), no longer the reduction count:
 /// `child_vec_allocs / semantic_reduce_calls` drops below 1, exactly the reuse
-/// signal the #583 gate doc anticipated.
+/// signal the #583 gate doc anticipated. On top of that, the node branch drains
+/// `kept` instead of consuming it, so the emptied buffer cycles through a
+/// per-parse [`ReduceScratch`] — steady state, the engine's shaping scratch
+/// allocates only when a transparent splice carries a buffer away onto the value
+/// stack.
 pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     rule_idx: usize,
     rule: &CompiledRule,
@@ -726,6 +730,7 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     builder: &mut B,
     ctx: &OutputContext,
     propagate: bool,
+    scratch: &mut ReduceScratch<B::Value>,
 ) -> GSlot<B::Value> {
     // Output-shape counter (#230): one reduction shaped, matching `assemble`.
     perf::add_semantic_reduce_call();
@@ -769,13 +774,18 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
         meta: Meta::default(),
         tag: GTag::None,
     };
-    // First materialization of the `kept` buffer: charge the child-buffer counter
-    // (#583/C8.2 — one *fresh* buffer; steals and the fast path charge nothing)
-    // and pre-size to the remaining direct arity.
+    // First materialization of the `kept` buffer: recycle the scratch buffer when
+    // one is banked, else charge the child-buffer counter (#583/C8.2 — one *fresh*
+    // buffer; recycles, steals, and the fast path charge nothing) and pre-size to
+    // the remaining direct arity.
     macro_rules! materialize {
         ($i:expr) => {
             if kept.capacity() == 0 {
-                perf::add_child_vec_alloc();
+                if scratch.kept.capacity() > 0 {
+                    kept = std::mem::take(&mut scratch.kept);
+                } else {
+                    perf::add_child_vec_alloc();
+                }
                 kept.reserve(len - $i + rule.options.placeholder_count);
             }
         };
@@ -849,13 +859,44 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
         if propagate {
             container.widen_meta(&mut node_meta);
         }
-        let mut values: Vec<B::Value> = kept.into_iter().map(|e| e.value).collect();
+        // Extract the child values by draining, not consuming: `kept` keeps its
+        // capacity and banks in the scratch for the next reduction. `values`
+        // likewise cycles — a taking builder (the tree backend `mem::take`s the
+        // children as the node's child list) leaves a fresh empty vec behind,
+        // while a reading builder (tape/null) leaves the buffer to be cleared
+        // and reused, so those paths reach a zero-alloc steady state.
+        let mut values = std::mem::take(&mut scratch.values);
+        values.reserve(kept.len());
+        values.extend(kept.drain(..).map(|e| e.value));
+        if kept.capacity() > scratch.kept.capacity() {
+            scratch.kept = kept;
+        }
         let value = builder.reduce(rule_idx, &mut values, &node_meta, ctx);
+        values.clear();
+        scratch.values = values;
         GSlot::Value(GElem {
             value,
             meta: node_meta,
             tag: GTag::Tree,
         })
+    }
+}
+
+/// Per-parse recycling scratch for [`shape_reduction`] (perf spike 2026-07-02):
+/// the emptied `kept` buffer and the (reading-builder) `values` buffer cycle
+/// here between reductions instead of round-tripping the allocator. Owned by the
+/// drive loop (`run_into`), one per parse.
+pub(crate) struct ReduceScratch<V> {
+    kept: Vec<GElem<V>>,
+    values: Vec<V>,
+}
+
+impl<V> ReduceScratch<V> {
+    pub(crate) fn new() -> Self {
+        ReduceScratch {
+            kept: Vec::new(),
+            values: Vec::new(),
+        }
     }
 }
 
