@@ -1,12 +1,19 @@
 name: lark-rs differential fuzz (nightly discovery)
 
-# Out-of-band *discovery* tier of the differential fuzzer — never on the PR
-# critical path. It generates a large batch of inputs with fresh entropy, freezes
-# Python Lark's verdict for each (into a throwaway scratch corpus, not the
-# committed one), and replays lark-rs against it. A RED here is a new find: the
-# batch is uploaded as an artifact so it can be minimized (`--minimize`) and kept
-# (`--record`) as a permanent regression case. Nothing is ever committed by this
-# job.
+# Out-of-band tiers of the differential fuzzer — never on the PR critical path.
+#
+# `discover` is the *discovery* tier: it generates a large batch of inputs with
+# fresh entropy, freezes Python Lark's verdict for each (into a throwaway scratch
+# corpus, not the committed one), and replays lark-rs against it. A RED here is a
+# new find: the batch is uploaded as an artifact so it can be minimized
+# (`--minimize`) and kept (`--record`) as a permanent regression case. Nothing is
+# ever committed by this job.
+#
+# `seed-range-regression` is the *regression* tier (epic #208): it replays the
+# committed grammar-fuzz seed range (`scripts/fuzz-seed-range.sh`), which was
+# once verified clean. Unlike the discovery tiers, it GATES — a RED means a
+# once-clean seed diverged again, i.e. a regression, per the "never regress a
+# green corpus" invariant.
 
 on:
   schedule:
@@ -110,3 +117,34 @@ jobs:
           path: |
             ${{ runner.temp }}/grammar_finds.json
             ${{ runner.temp }}/grammar_fuzz.log
+
+  # The committed-range regression tier (epic #208). Deterministic — no fresh
+  # entropy — and GATING: this range ran clean when it was committed, so any
+  # divergence is a regression. A find's JSON names the exact seed; replay with
+  # `python3 tools/fuzz_differential.py --fuzz-grammars --seed <seed> -n 40
+  # --gg-inputs 15`.
+  seed-range-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Replay the committed grammar-fuzz seed range
+        run: |
+          scripts/fuzz-seed-range.sh \
+            --gg-finds-out "$RUNNER_TEMP/seed_range_finds.json"
+
+      - name: Upload seed-range regression finds
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-range-regression-find-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}/seed_range_finds.json
