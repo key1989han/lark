@@ -101,7 +101,7 @@ pub(super) struct Scanner {
     /// common case (no lookaround).
     side: Vec<(usize, SymbolId, SideProbe)>,
     /// regex-terminal-id → compiled keyword retype table.
-    unless: HashMap<SymbolId, RetypeTable>,
+    unless: Vec<Option<RetypeTable>>,
     /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
     /// `match_at` runs behind `&self` (the contextual lexer's per-token path).
     locs: Option<RefCell<CaptureLocations>>,
@@ -122,7 +122,7 @@ impl Scanner {
         // generator (`scanner_plan`) so a baked scanner is byte-identical to this
         // runtime one.
         let plan = scanner_plan(terminals, global_flags)?;
-        let unless = RetypeTable::build_all(&plan.unless)?;
+        let unless = RetypeTable::build_all_dense(&plan.unless)?;
         let prefix = plan.global_prefix;
 
         // Split the plan's (rank-ordered) terminals into *plain* terminals — which
@@ -272,7 +272,8 @@ impl Scanner {
         let (_, id, value) = best?;
         let ty = self
             .unless
-            .get(&id)
+            .get(id.index())
+            .and_then(|m| m.as_ref())
             .and_then(|m| m.retype(value))
             .unwrap_or(id);
         Some((ty, value))

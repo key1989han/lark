@@ -35,7 +35,7 @@ use crate::grammar::intern::SymbolId;
 pub struct DynamicMatcher {
     res: HashMap<SymbolId, TermRegex>,
     ignore: Vec<SymbolId>,
-    names: HashMap<SymbolId, String>,
+    names: Vec<String>,
 }
 
 /// One terminal's per-terminal matcher for the dynamic lexer: the `regex` crate for
@@ -191,6 +191,6 @@ impl DynamicMatcher {
 
     /// Display name of a terminal id (for the token's `type_`).
     pub fn name(&self, id: SymbolId) -> &str {
-        self.names.get(&id).map(String::as_str).unwrap_or("")
+        self.names.get(id.index()).map(String::as_str).unwrap_or("")
     }
 }

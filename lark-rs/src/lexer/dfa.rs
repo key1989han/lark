@@ -88,7 +88,7 @@ pub(super) struct DfaScanner {
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
-    unless: HashMap<SymbolId, RetypeTable>,
+    unless: Vec<Option<RetypeTable>>,
     /// Fence-idiom terminals (tag-echo delimited, `fence.rs`), matched by the
     /// two-phase scanner unconditionally — they do their own open-literal
     /// pre-check and are not included in `start_bytes`. They bypass the refusal
@@ -430,7 +430,7 @@ impl DfaScanner {
         global_flags: u32,
     ) -> Result<DfaScanner, GrammarError> {
         let plan = scanner_plan(terminals, global_flags)?;
-        let unless = RetypeTable::build_all(&plan.unless)?;
+        let unless = RetypeTable::build_all_dense(&plan.unless)?;
         let by_id: HashMap<SymbolId, &TerminalDef> =
             terminals.iter().map(|(id, t)| (*id, *t)).collect();
 
@@ -505,7 +505,8 @@ impl DfaScanner {
         let (_, _, id, value) = best?;
         let ty = self
             .unless
-            .get(&id)
+            .get(id.index())
+            .and_then(|m| m.as_ref())
             .and_then(|m| m.retype(value))
             .unwrap_or(id);
         Some((ty, value))

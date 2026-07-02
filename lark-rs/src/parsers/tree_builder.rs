@@ -695,7 +695,11 @@ fn nones_at_gap(rule: &CompiledRule, gap: usize) -> usize {
 pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     rule_idx: usize,
     rule: &CompiledRule,
-    child_slots: Vec<GSlot<B::Value>>,
+    // The engine's value stack: this reduction consumes its last `len` slots in
+    // place (perf spike 2026-07-01 — no per-reduction `drain().collect()`
+    // intermediate `Vec`).
+    value_stack: &mut Vec<GSlot<B::Value>>,
+    len: usize,
     builder: &mut B,
     ctx: &OutputContext,
     propagate: bool,
@@ -718,14 +722,19 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     // Flatten to the kept child list (drop per-position filtered punctuation, splice
     // transparent inlines, insert `nones_before` placeholders), accumulating the
     // pre-filter container span exactly as `assemble` does.
-    let mut kept: Vec<GElem<B::Value>> = Vec::new();
+    // Pre-size to the rule arity: right for every non-splicing reduction (an
+    // Inline splice can exceed it, but Vec growth handles that), and it removes
+    // the 4→8→16… growth reallocs the incremental pushes otherwise pay
+    // (perf spike 2026-07-01).
+    let mut kept: Vec<GElem<B::Value>> = Vec::with_capacity(len + rule.options.placeholder_count);
     let mut container = ContainerSpan::new();
     let placeholder = |builder: &mut B| GElem {
         value: builder.placeholder(ctx),
         meta: Meta::default(),
         tag: GTag::None,
     };
-    for (i, slot) in child_slots.into_iter().enumerate() {
+    let drain_start = value_stack.len() - len;
+    for (i, slot) in value_stack.drain(drain_start..).enumerate() {
         for _ in 0..nones_at_gap(rule, i) {
             kept.push(placeholder(builder));
         }

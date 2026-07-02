@@ -96,6 +96,23 @@ impl RetypeTable {
             .map(|(id, entries)| Ok((*id, RetypeTable::build(entries)?)))
             .collect()
     }
+
+    /// Dense (`SymbolId::index()`-indexed) variant of [`build_all`]: the winning
+    /// terminal's per-token `unless` lookup becomes an array read, not a SipHash
+    /// map probe (perf spike 2026-07-01). Empty when the plan has no `unless`
+    /// entries, so grammars without keyword retyping pay one bounds check.
+    pub(super) fn build_all_dense(
+        plan: &HashMap<SymbolId, Vec<UnlessEntry>>,
+    ) -> Result<Vec<Option<RetypeTable>>, GrammarError> {
+        let mut dense: Vec<Option<RetypeTable>> = Vec::new();
+        for (id, entries) in plan {
+            if dense.len() <= id.index() {
+                dense.resize_with(id.index() + 1, || None);
+            }
+            dense[id.index()] = Some(RetypeTable::build(entries)?);
+        }
+        Ok(dense)
+    }
 }
 
 /// Compute the [`ScannerPlan`] for a candidate terminal set, applying exactly the

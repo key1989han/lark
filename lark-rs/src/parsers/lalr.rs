@@ -1086,8 +1086,11 @@ impl LalrParser {
 
         loop {
             let state = *state_stack.last().unwrap();
-            let token = match source.peek(state) {
-                Ok(tok) => tok,
+            // Dispatch on the terminal id alone — the token itself is only
+            // materialized (moved, not cloned) at the SHIFT, and only cloned on
+            // the cold error paths (perf spike 2026-07-01).
+            let ttype = match source.peek_type(state) {
+                Ok(t) => t,
                 Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
@@ -1096,46 +1099,71 @@ impl LalrParser {
             // — the inlined analog of `ParserStack::feed_token` over the generic stack.
             loop {
                 let state = *state_stack.last().unwrap();
-                match self.table.action_at(state, token.type_id) {
+                match self.table.action_at(state, ttype) {
                     Some(Action::Shift(next_state)) => {
+                        // The token is cached by the peek_type above; take_current
+                        // moves it out and advances the source — no clone.
+                        let token = match source.take_current(state) {
+                            Ok(t) => t,
+                            Err(SourceError::Lex(failure)) => {
+                                return Err(self.lex_failure(state, failure))
+                            }
+                            Err(SourceError::Postlex(e)) => return Err(e),
+                        };
                         let meta = meta_from_token(&token);
-                        let value = builder.token(token.clone(), input, &ctx);
+                        let value = builder.token(token, input, &ctx);
                         state_stack.push(next_state);
                         value_stack.push(GSlot::Value(GElem {
                             value,
                             meta,
                             tag: GTag::Token,
                         }));
-                        source.advance();
                         break;
                     }
                     Some(Action::Reduce(rule_idx)) => {
                         let rule = &self.table.rules[rule_idx];
                         let len = rule.expansion.len();
-                        let child_slots: Vec<GSlot<B::Value>> =
-                            value_stack.drain(value_stack.len() - len..).collect();
-                        for _ in 0..len {
-                            state_stack.pop();
-                        }
+                        state_stack.truncate(state_stack.len() - len);
+                        // shape_reduction drains the last `len` slots off the
+                        // value stack in place — no intermediate `Vec` per
+                        // reduction (perf spike 2026-07-01).
                         let shaped = shape_reduction(
                             rule_idx,
                             rule,
-                            child_slots,
+                            &mut value_stack,
+                            len,
                             builder,
                             &ctx,
                             self.table.propagate_positions,
                         );
                         let top = *state_stack.last().unwrap();
                         let nt_index = (rule.origin.index() - self.table.n_terminals) as u32;
-                        let next = self.table.goto_at(top, nt_index).ok_or_else(|| {
-                            ParseError::UnexpectedToken {
-                                token: token.value.clone(),
-                                token_type: self.table.symbols.name(rule.origin).to_string(),
-                                line: token.line,
-                                col: token.column,
-                                expected: vec![self.table.symbols.name(rule.origin).to_string()],
+                        let next = match self.table.goto_at(top, nt_index) {
+                            Some(n) => n,
+                            None => {
+                                // Cold path: the token is still cached, so this
+                                // peek is a clone of the cached value, never a
+                                // re-lex.
+                                let token = match source.peek(state) {
+                                    Ok(t) => t,
+                                    Err(SourceError::Lex(failure)) => {
+                                        return Err(self.lex_failure(state, failure))
+                                    }
+                                    Err(SourceError::Postlex(e)) => return Err(e),
+                                };
+                                return Err(ParseError::UnexpectedToken {
+                                    token: token.value.clone(),
+                                    token_type: self.table.symbols.name(rule.origin).to_string(),
+                                    line: token.line,
+                                    col: token.column,
+                                    expected: vec![self
+                                        .table
+                                        .symbols
+                                        .name(rule.origin)
+                                        .to_string()],
+                                });
                             }
-                        })?;
+                        };
                         state_stack.push(next as usize);
                         value_stack.push(shaped);
                     }
@@ -1146,7 +1174,16 @@ impl LalrParser {
                             .and_then(accept_value)
                             .map_err(|_| ParseError::unexpected_eof(0, 0, vec![]));
                     }
-                    None => return Err(self.unexpected(state, &token)),
+                    None => {
+                        let token = match source.peek(state) {
+                            Ok(t) => t,
+                            Err(SourceError::Lex(failure)) => {
+                                return Err(self.lex_failure(state, failure))
+                            }
+                            Err(SourceError::Postlex(e)) => return Err(e),
+                        };
+                        return Err(self.unexpected(state, &token));
+                    }
                 }
             }
         }
