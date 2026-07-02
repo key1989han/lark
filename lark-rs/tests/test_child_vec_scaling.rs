@@ -114,27 +114,26 @@ fn child_vec_allocs_are_bounded() {
          shape_reduction (or this input never reduces)"
     );
 
-    // ── Assertion 1: reuse ratio == 1 (one child buffer per reduction). ────────
-    // `child_vec_allocs == semantic_reduce_calls` pins the *current* (bounded,
-    // not-reused) one-tick-per-reduction state: today the reuse ratio is exactly 1.
-    // The two counters are charged adjacently in `shape_reduction`, so this equality
-    // is the tripwire on the counter *placement* itself — a future pooling/arena
-    // strategy (#242/#243) that moves the tick to charge fewer buffers than nodes
-    // drives allocs BELOW reduces (the reuse win the gate is laid to show), and a
-    // regression that charged per child would drive it ABOVE. The load-bearing
-    // *boundedness* claim is the `== 2n+1` closed form in assertion 2.
+    // ── Assertion 1: reuse ratio < 1 — the #242/#243 reuse state. ──────────────
+    // Since the child-buffer reuse pass (perf spike 2026-07-02: `ReduceScratch`
+    // recycling + `Inline` steal + `expand1` fast path), `child_vec_allocs` charges
+    // only *fresh* buffer allocations (scratch/steal recycles charge nothing).
+    // LIST_GRAMMAR has no transparent rule, so no buffer ever leaves onto the value
+    // stack: after the first reduction materializes the one scratch buffer, every
+    // later reduction recycles it — the closed form is exactly **1 fresh buffer per
+    // parse**, independent of n. Rising above it means the recycling was lost (a
+    // regression back toward one-buffer-per-reduction, or worse, per-child).
     assert_eq!(
-        allocs, reduces,
-        "child_vec_allocs must equal semantic_reduce_calls (one child buffer charged \
-         per reduction — the bounded, not-yet-reused reuse-ratio-1 state #583 \
-         documents). allocs<reduces would be a reuse win (#242/#243); allocs>reduces \
-         a per-child blowup"
+        allocs, 1,
+        "child_vec_allocs must be exactly 1 on the list grammar (the single fresh \
+         scratch materialization; every later reduction recycles it — the \
+         #242/#243 reuse state). allocs>1 means recycling regressed; \
+         semantic_reduce_calls={reduces} for scale"
     );
 
-    // ── Assertion 2: linear in output shape across a sweep, no super-linear blowup.
-    // The grammar's closed form is 2n+1 (see LIST_GRAMMAR), so we pin the exact
-    // count and the flat per-item rate across the sweep — the deterministic
-    // "flat per unit" envelope the gate discipline demands (BENCH.md).
+    // ── Assertion 2: flat (O(1)) across the size sweep, no per-node/per-child
+    // blowup. The reuse makes fresh-buffer work *constant* in output shape here,
+    // strictly stronger than the old flat-per-node envelope (BENCH.md).
     let sweep = [1usize, 2, 4, 8, 16, 32];
     let mut rows: Vec<(usize, u64, u64)> = Vec::new();
     for &n in &sweep {
@@ -144,32 +143,17 @@ fn child_vec_allocs_are_bounded() {
     eprintln!("child-vec sweep (n, allocs, reduces) = {rows:?}");
 
     for &(n, allocs, reduces) in &rows {
-        let expected = (2 * n + 1) as u64;
         assert_eq!(
-            allocs, expected,
-            "child_vec_allocs must scale as the closed-form reduction count 2n+1 \
-             (flat per node) with output shape (n={n}); a super-linear blowup would \
-             exceed it"
+            allocs, 1,
+            "fresh child-buffer count must stay exactly 1 across the sweep \
+             (n={n}, reduces={reduces}); growth means the scratch recycling was lost"
         );
         assert_eq!(
-            allocs, reduces,
-            "the one-buffer-per-reduction invariant must hold at every size (n={n})"
+            reduces,
+            (2 * n + 1) as u64,
+            "the reduction count itself must keep the 2n+1 closed form (n={n})"
         );
     }
-
-    // Flat per-item allocation rate: `(allocs - 1) / n` is exactly 2 for every n, so
-    // doubling n doubles the buffers (linear), never super-linearly. Compare the
-    // smallest and largest sweep points explicitly — a per-child or per-span-cell
-    // blowup would make the big-n rate climb.
-    let per_item = |&(n, allocs, _): &(usize, u64, u64)| (allocs - 1) / n as u64;
-    let small = per_item(&rows[1]); // n=2
-    let big = per_item(rows.last().unwrap()); // n=32
-    assert_eq!(
-        small, big,
-        "per-item child-buffer allocation rate must be flat (child-buffer work is \
-         linear in output shape, no super-linear blowup): (allocs-1)/n = {small} at \
-         n=2 vs {big} at n=32"
-    );
 }
 
 /// Without the `perf-counters` feature the counter is a no-op, so the gate cannot

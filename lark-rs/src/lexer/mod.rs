@@ -700,7 +700,14 @@ impl ContextualLexer {
         }
         Token {
             type_id: id,
-            type_: self.names[id.index()].clone(),
+            // Span (value-less) tokens skip the name clone too: the span/tape
+            // builders resolve names lazily from `type_id`, so the owned `type_`
+            // is dead weight there — 1 alloc per token, including ignored ones
+            // (perf spike 2026-07-02).
+            type_: match mode {
+                TokenValueMode::Owned => self.names[id.index()].clone(),
+                TokenValueMode::Span => String::new(),
+            },
             value: token_value(value, mode),
             line: checked_pos(line),
             column: checked_pos(col),
