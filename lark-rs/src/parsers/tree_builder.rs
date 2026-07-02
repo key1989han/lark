@@ -776,24 +776,27 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     };
     // First materialization of the `kept` buffer: recycle the scratch buffer when
     // one is banked, else charge the child-buffer counter (#583/C8.2 — one *fresh*
-    // buffer; recycles, steals, and the fast path charge nothing) and pre-size to
-    // the remaining direct arity.
+    // buffer; recycles, steals, and the fast path charge nothing) and reserve
+    // `$cap` slots. Every path that grows `kept` from empty *must* route through
+    // here so the recycling and the counter both see the allocation — including the
+    // trailing-placeholder pushes below, whose first push (for a reduction with no
+    // preceding kept child) would otherwise allocate silently.
     macro_rules! materialize {
-        ($i:expr) => {
+        ($cap:expr) => {
             if kept.capacity() == 0 {
                 if scratch.kept.capacity() > 0 {
                     kept = std::mem::take(&mut scratch.kept);
                 } else {
                     perf::add_child_vec_alloc();
                 }
-                kept.reserve(len - $i + rule.options.placeholder_count);
+                kept.reserve($cap);
             }
         };
     }
     let drain_start = value_stack.len() - len;
     for (i, slot) in value_stack.drain(drain_start..).enumerate() {
         for _ in 0..nones_at_gap(rule, i) {
-            materialize!(i);
+            materialize!(len - i + rule.options.placeholder_count);
             kept.push(placeholder(builder));
         }
         match slot {
@@ -803,7 +806,7 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
                 }
                 let filtered = e.tag == GTag::Token && !keep_token_pos(rule, i);
                 if !filtered {
-                    materialize!(i);
+                    materialize!(len - i + rule.options.placeholder_count);
                     kept.push(e);
                 }
             }
@@ -825,7 +828,14 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
         }
     }
     // Trailing placeholders: an empty `[...]`'s widest-alternative count, plus a
-    // distributed absent `[...]` at the end of this alternative.
+    // distributed absent `[...]` at the end of this alternative. Materialize first
+    // (with room for both) so a reduction whose *only* children are trailing
+    // placeholders still recycles the scratch buffer and charges the counter — the
+    // buffer growth must not bypass `materialize!`.
+    let trailing = rule.options.placeholder_count + nones_at_gap(rule, rule.expansion.len());
+    if trailing > 0 {
+        materialize!(trailing);
+    }
     for _ in 0..rule.options.placeholder_count {
         kept.push(placeholder(builder));
     }

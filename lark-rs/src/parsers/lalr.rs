@@ -1023,8 +1023,20 @@ impl LalrParser {
     /// Build the error for a token with no action in the current state, filling
     /// `expected` from the state's action row (only the parser knows it). Shared by
     /// the batch driver and the interactive parser (issue #168).
+    ///
+    /// The reported `token_type` is resolved from the token's interned `type_id`
+    /// via the symbol table, not read off `token.type_`. On the owned path the two
+    /// are byte-identical (the lexer sets `type_` from the same table), so this is
+    /// behaviour-preserving there; but the span/tape token sources emit value-less,
+    /// **name-less** tokens (positions + `type_id` only, for zero-alloc lexing), so
+    /// resolving from the id is what keeps `parse_span`/`parse_tape` error
+    /// `token_type` identical to `parse()` instead of leaking an empty string.
     pub(crate) fn unexpected(&self, state: usize, token: &Token) -> ParseError {
-        ParseError::unexpected_token(token, self.expected_at(state))
+        ParseError::unexpected_token_named(
+            token,
+            self.table.symbols.name(token.type_id),
+            self.expected_at(state),
+        )
     }
 
     /// A fresh [`ParserStack`] at the start state for `start` — the seed of an

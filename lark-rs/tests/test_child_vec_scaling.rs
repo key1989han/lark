@@ -144,7 +144,71 @@ fn child_vec_allocs_are_bounded() {
             "the reduction count itself must keep the 2n+1 closed form (n={n})"
         );
     }
+
+    // ── Assertion 3: the trailing-placeholder path is materialization-visible. ──
+    // `maybe_placeholders` inserts a `None` per absent optional; `item: "(" [A] ")"`
+    // with the optional absent makes every `item` reduction's kept children *only*
+    // placeholders (the `"("`/`")"` punctuation is filtered). That exercises the
+    // trailing-placeholder push in `shape_reduction`, which used to grow the child
+    // buffer *without* routing through the recycle/counter site — a placeholder-first
+    // reduction allocated silently, so `child_vec_allocs` under-counted (the review
+    // finding). The counter must now see it (> 0), and the scratch recycling must
+    // keep the fresh-buffer count *bounded* across the sweep, not one-per-item.
+    let placeholder = Lark::new(
+        PLACEHOLDER_GRAMMAR,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            start: vec!["start".to_string()],
+            maybe_placeholders: true,
+            ..Default::default()
+        },
+    )
+    .expect("placeholder grammar must build under LALR");
+    let parse_ph = |n: usize| -> (u64, u64) {
+        let input = vec!["()"; n].join(" ");
+        perf::reset();
+        placeholder
+            .parse(&input)
+            .expect("placeholder parse must succeed");
+        (perf::child_vec_allocs(), perf::semantic_reduce_calls())
+    };
+    let mut ph_rows = Vec::new();
+    for &n in &[1usize, 2, 4, 8, 16, 32] {
+        ph_rows.push((n, parse_ph(n)));
+    }
+    eprintln!("placeholder sweep (n, (allocs, reduces)) = {ph_rows:?}");
+    let (allocs1, reduces1) = ph_rows[0].1;
+    assert!(
+        allocs1 > 0,
+        "a placeholder-producing reduction must charge child_vec_allocs; 0 means the \
+         trailing-placeholder push bypassed the materialize/recycle site"
+    );
+    let (max_allocs, reduces_big) = ph_rows.last().unwrap().1;
+    assert!(
+        max_allocs <= allocs1 + 2,
+        "fresh child-buffer count must stay bounded across the placeholder sweep \
+         (scratch reuse): {max_allocs} at n=32 vs {allocs1} at n=1 — a per-item climb \
+         means the placeholder path stopped recycling"
+    );
+    assert!(
+        reduces_big > reduces1,
+        "reduction count must grow with item count (sanity: the sweep parses more)"
+    );
 }
+
+/// A **placeholder-producing** grammar: `maybe_placeholders` inserts a `None` for
+/// each absent optional, and every `item` is `"(" [A] ")"` with the optional
+/// absent — so each `item` reduction's kept children are *only* placeholders (the
+/// `"("`/`")"` punctuation is filtered), exercising the trailing-placeholder
+/// materialization path in `shape_reduction`.
+#[cfg(feature = "perf-counters")]
+const PLACEHOLDER_GRAMMAR: &str = r#"
+start: item+
+item: "(" [A] ")"
+A: "a"
+%ignore " "
+"#;
 
 /// Without the `perf-counters` feature the counter is a no-op, so the gate cannot
 /// run. Keep a visible placeholder documenting how to run it (mirrors the other

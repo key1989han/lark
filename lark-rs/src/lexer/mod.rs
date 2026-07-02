@@ -385,7 +385,15 @@ impl BasicLexer {
         }
         Some(Token {
             type_id: id,
-            type_: self.names[id.index()].clone(),
+            // Span (value-less) tokens skip the name clone too — consistently with
+            // the contextual path (perf spike 2026-07-02): the span/tape builders
+            // resolve names lazily from `type_id`, and error reporting resolves the
+            // terminal name from the symbol table (`LalrParser::unexpected`), so the
+            // owned `type_` is dead weight on the span path.
+            type_: match mode {
+                TokenValueMode::Owned => self.names[id.index()].clone(),
+                TokenValueMode::Span => String::new(),
+            },
             value: token_value(value, mode),
             line: checked_pos(start_line),
             column: checked_pos(start_col),

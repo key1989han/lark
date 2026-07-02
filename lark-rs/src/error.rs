@@ -165,6 +165,26 @@ impl ParseError {
         token: &crate::tree::Token,
         expected: Vec<String>,
     ) -> ParseError {
+        // Owned-path tokens carry their terminal name in `type_`, so read it there.
+        Self::unexpected_token_named(token, &token.type_, expected)
+    }
+
+    /// As [`unexpected_token`](Self::unexpected_token), but with the terminal
+    /// `type_name` supplied explicitly rather than read from `token.type_`.
+    ///
+    /// The span/tape token sources emit **name-less** tokens (positions + interned
+    /// `type_id` only — no owned `type_` string — for zero-alloc lexing), so the
+    /// error's `token_type` must be resolved from the id by the caller (which holds
+    /// the symbol table) and threaded through here. On the owned path the caller
+    /// passes `token.type_`, so the result is byte-identical to `unexpected_token`;
+    /// the split exists only so the two callers cannot drift on the END-vs-token
+    /// shape. (For the synthetic end-of-input terminal the name is irrelevant — it
+    /// collapses to [`UnexpectedEof`](ParseError::UnexpectedEof).)
+    pub(crate) fn unexpected_token_named(
+        token: &crate::tree::Token,
+        type_name: &str,
+        expected: Vec<String>,
+    ) -> ParseError {
         if token.type_id == crate::grammar::intern::SymbolId::END {
             ParseError::UnexpectedEof {
                 line: token.line as usize,
@@ -174,7 +194,7 @@ impl ParseError {
         } else {
             ParseError::UnexpectedToken {
                 token: token.value.clone(),
-                token_type: token.type_.clone(),
+                token_type: type_name.to_string(),
                 line: token.line as usize,
                 col: token.column as usize,
                 expected,

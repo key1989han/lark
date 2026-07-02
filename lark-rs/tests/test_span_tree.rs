@@ -245,6 +245,48 @@ fn parse_span_rejects_earley() {
     );
 }
 
+// ─── Error parity: span-mode name-less tokens must not degrade error reports ─────
+
+/// The span/tape token sources emit value-less, **name-less** tokens (`type_` is
+/// empty — the name is resolved lazily from `type_id`). A parse error must still
+/// report the correct terminal name in `token_type`: `LalrParser::unexpected`
+/// resolves it from the symbol table, so `parse_span` errors match `parse()`
+/// errors rather than leaking `token_type: ""`. Regression pin for the span-mode
+/// name-clone-skip review finding (perf spike 2026-07-02).
+#[test]
+fn span_error_token_type_matches_parse() {
+    const G: &str = r#"
+        start: A B
+        A: "a"
+        B: "b"
+        %ignore " "
+    "#;
+
+    fn token_type(err: &lark_rs::ParseError) -> &str {
+        match err {
+            lark_rs::ParseError::UnexpectedToken { token_type, .. } => token_type,
+            other => panic!("expected UnexpectedToken, got {other:?}"),
+        }
+    }
+
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let l = lark(G, lexer.clone(), false);
+        // "a a": the second `A` appears where `B` is expected — an UnexpectedToken.
+        let parse_err = l.parse("a a").expect_err("parse must reject");
+        let span_err = match l.parse_span("a a").expect_err("parse_span must reject") {
+            lark_rs::LarkError::Parse(e) => e,
+            other => panic!("expected a Parse error, got {other:?}"),
+        };
+        assert_eq!(
+            token_type(&parse_err),
+            token_type(&span_err),
+            "span-mode error token_type must match parse() (lexer={lexer:?}); \
+             an empty string means the name-less span token leaked into the error"
+        );
+        assert_eq!(token_type(&span_err), "A", "the offending token is an A");
+    }
+}
+
 // ─── Whole-bank projection: span materialize == tree parse over the LALR bank ────
 
 mod bank {
