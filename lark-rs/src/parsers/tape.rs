@@ -1,7 +1,11 @@
-//! `TapeTree<'i, 'g>` — the internal flat-tape **output** backend prototype
-//! (#243 C8c, perf spike 2026-07-02). **Experimental, feature-gated
-//! (`--features tape-tree`), internal-only** — not a public commitment (the
-//! promotion question is #243's `needs-decision`; ADR-0029).
+//! `TapeTree<'i, 'g>` — the flat-tape **output** backend prototype (#243 C8c, perf
+//! spike 2026-07-02). **Experimental and feature-gated (`--features tape-tree`,
+//! default OFF):** the surface (`Lark::parse_tape`, `TapeTree`, `TapeEntry`) is
+//! *public when the feature is enabled* but **not stable and not a public
+//! commitment** — the same experimental-surface pattern as `SpanTree`
+//! (ADR-0029 fork 3). A default build carries none of it. Promoting the tape to a
+//! committed `OutputMode` (and its layout contract) is the architect's call — the
+//! `needs-decision` on #243 — not something this prototype settles.
 //!
 //! Where the default tree backend materializes one `Tree` + label `String` +
 //! child `Vec` per node and two `String`s per token, and the opt-in `SpanTree`
@@ -265,8 +269,14 @@ impl<'i> OutputBuilder<'i> for TapeBuilder {
         _ctx: &OutputContext,
     ) -> u32 {
         let kids_start = self.kids.len();
+        // Every index this backend stores is a `u32`; the tape is index-based, so
+        // assert each cast's source is in range before it is truncated. The *end*
+        // offset (`kids_start + children.len()`) is the binding bound — if it fits,
+        // `kids_start` and `children.len()` individually do too — and it also covers
+        // the rule index (rule counts are far below the kid count on any real parse).
+        debug_assert!(rule <= u32::MAX as usize, "tape rule index exceeds u32");
         debug_assert!(
-            kids_start <= u32::MAX as usize,
+            kids_start + children.len() <= u32::MAX as usize,
             "tape kid count exceeds u32"
         );
         self.kids.extend_from_slice(children);

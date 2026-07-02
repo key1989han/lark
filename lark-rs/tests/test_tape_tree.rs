@@ -30,6 +30,18 @@ fn lark(grammar: &str, lexer: LexerType, propagate: bool) -> Lark {
     .expect("grammar builds")
 }
 
+/// Serializes the process-global `perf`-counter gate (`mod counters`, active only
+/// under `--features perf-counters`) against any *other* test in this binary that
+/// **charges** those counters via `parse()`/`parse_tape()`. The counters are shared
+/// atomics, so a concurrent parse between the gate's `perf::reset()` and its reads
+/// would corrupt them. Every counter-charging test holds this lock for its
+/// duration; uncontended (a no-op) when `perf-counters` is off. Poison is ignored.
+static COUNTER_GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn counter_gate_lock() -> std::sync::MutexGuard<'static, ()> {
+    COUNTER_GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 const ARITH: &str = r#"
     start: sum
     ?sum: product | sum "+" product | sum "-" product
@@ -70,6 +82,9 @@ const SHAPES: &str = r#"
 /// The relative oracle: for every (lexer, propagate) configuration and input,
 /// `parse_tape(input).materialize()` is byte-identical to `parse(input)`.
 fn assert_tape_projects_to_parse(grammar: &str, inputs: &[&str]) {
+    // Charges the global perf counters via parse/parse_tape — serialize against the
+    // counter gate (a no-op without `perf-counters`).
+    let _counters = counter_gate_lock();
     for lexer in [LexerType::Basic, LexerType::Contextual] {
         for propagate in [false, true] {
             let l = lark(grammar, lexer.clone(), propagate);
@@ -117,6 +132,7 @@ fn tape_projects_to_parse_transparent_expand1_keepall() {
 
 #[test]
 fn tape_token_text_borrows_the_input_non_ascii() {
+    let _counters = counter_gate_lock();
     // Non-ASCII input: char→byte cursor must map positions correctly.
     let grammar = r#"
         start: WORD ("," WORD)*
@@ -209,6 +225,9 @@ mod bank {
     /// no XFAIL allow-list — zero divergences required.
     #[test]
     fn tape_projects_to_parse_over_compliance_bank() {
+        // Charges the global perf counters over the whole bank — serialize against
+        // the counter gate (a no-op without `perf-counters`).
+        let _counters = super::counter_gate_lock();
         let Some(bank) = load_json("bank.json") else {
             eprintln!("compliance bank absent — skipping (generate with tools/)");
             return;
@@ -224,6 +243,11 @@ mod bank {
             })
             .unwrap_or_default();
 
+        // Silence the panic output while we `catch_unwind` over the bank, but SAVE
+        // the previous hook and restore it afterwards — `take_hook()` alone would
+        // drop it and leave the *default* hook installed for the rest of the process
+        // (the hook is global). Restored below regardless of the loop's outcome.
+        let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
 
         let mut divergences: Vec<String> = Vec::new();
@@ -271,7 +295,7 @@ mod bank {
             }
         }
 
-        let _ = std::panic::take_hook();
+        std::panic::set_hook(prev_hook);
         eprintln!(
             "tape projection: {built} grammars built, {compared} cases compared, \
              {} divergences",
@@ -308,6 +332,9 @@ ITEM: "a"
             perf::ENABLED,
             "built with perf-counters but counters report disabled"
         );
+        // Hold the shared lock for the whole gate: no other counter-charging test in
+        // this binary may run between our `perf::reset()` and our counter reads.
+        let _counters = super::counter_gate_lock();
         let parser = Lark::new(
             LIST_GRAMMAR,
             LarkOptions {
