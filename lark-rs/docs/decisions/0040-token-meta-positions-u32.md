@@ -1,6 +1,6 @@
 # ADR-0040: source positions stored as `u32` behind `usize` accessors, `wide-positions` for >4 GiB
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted — ratified by the architect's merge of PR #602 (2026-07-02)
 - **Date:** 2026-07-02
 
 ## Context
