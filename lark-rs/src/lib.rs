@@ -145,6 +145,25 @@ impl Lark {
         self.frontend.parse_span(input, Some(start))
     }
 
+    /// Parse `input` onto a flat [`TapeTree`] — the tape output backend prototype
+    /// (#243 C8c; **experimental, internal-only**, `--features tape-tree`).
+    ///
+    /// The whole parse is appended to two flat arrays (amortized growth — O(log n)
+    /// allocator calls per parse on the output side): no `Tree` is built, no token
+    /// value or label is copied. [`TapeTree::materialize`] projects the tape back
+    /// to the exact [`ParseTree`] `parse()` returns (the ADR-0026 relative oracle).
+    /// Same support boundary as [`parse_into`](Self::parse_into).
+    ///
+    /// [`TapeTree`]: crate::parsers::tape::TapeTree
+    /// [`TapeTree::materialize`]: crate::parsers::tape::TapeTree::materialize
+    #[cfg(feature = "tape-tree")]
+    pub fn parse_tape<'i, 'g>(
+        &'g self,
+        input: &'i str,
+    ) -> Result<crate::parsers::tape::TapeTree<'i, 'g>, LarkError> {
+        self.frontend.parse_tape(input, None)
+    }
+
     /// Parse with built-in panic-mode error recovery (issues #43, #94).
     ///
     /// Instead of aborting on the first parse error, the parser deletes the

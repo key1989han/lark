@@ -135,4 +135,19 @@ fn main() {
             bytes as f64 / t_span / 1e6
         );
     }
+
+    #[cfg(feature = "tape-tree")]
+    {
+        let t_tape = time(
+            || {
+                black_box(lark.parse_tape(&input).unwrap());
+            },
+            15,
+        );
+        println!(
+            "parse_tape()      \t{:.3} ms\t{:.1} MB/s",
+            t_tape * 1e3,
+            bytes as f64 / t_tape / 1e6
+        );
+    }
 }
