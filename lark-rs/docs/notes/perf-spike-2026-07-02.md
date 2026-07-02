@@ -76,6 +76,26 @@ rows are flat. On the 146 KB `parse_floor` workload the cumulative owned-tree
 win is larger (21.1 → 14.6 ms, **1.44×**) because that shape is list-heavy —
 exactly where the O(n²) splice copying bit hardest.
 
+Wild bank (`cargo bench --bench wild`, corpus rows, median, master worktree →
+spike, same box, same session):
+
+| project | engine | master | spike | ratio |
+|---|---|---:|---:|---:|
+| cel | LALR | 2.19 ms | 1.86 ms | **1.17×** |
+| lark_lark | LALR | 4.21 ms | 3.04 ms | **1.38×** |
+| mappyfile | LALR | 14.24 ms | 12.10 ms | **1.18×** |
+| matter_idl | LALR | 46.7 ms | 35.5 ms | **1.32×** |
+| poetry_markers / pep508 | LALR | 0.04 ms | 0.04 ms | 1.09–1.10× |
+| pylogics_ltl | LALR | 0.04 ms | 0.03 ms | **1.50×** |
+| pyquil | LALR | 1.54 ms | 1.28 ms | **1.20×** |
+| tartiflette | LALR | 3.38 ms | 2.85 ms | **1.19×** |
+| vyper | LALR | 4.27 ms | 3.39 ms | **1.26×** |
+| dotmotif / mistql | Earley | 6.43 / 22.98 ms | 6.36 / 23.36 ms | ~1.0× |
+
+Real-world LALR grammars land 1.09–1.50× (geomean ~1.2×); grammars with deep
+spliced lists (lark_lark, matter_idl, vyper) win most, exactly as the steal
+mechanism predicts.
+
 ## The tape backend (#243 C8c) — the floor is reachable
 
 `examples/parse_floor.rs` (146 KB JSON), all four points, spike build:
@@ -161,6 +181,16 @@ change that made it obsolete — from pinning the ratio-1 state to pinning the
 reuse closed form (fresh buffers == 1 on the list grammar), exactly the
 transition its own documentation reserved for the #242/#243 work.
 
-## Addendum: X3 (`Child::Tree(Box<Tree>)`) measurement
+## Addendum: X3 (`Child::Tree(Box<Tree>)`) — measured, not worth it
 
-(filled in from the isolated-worktree experiment; see PR discussion)
+Measured both directions in an isolated worktree against the pre-spike
+baseline (where the boxing hypothesis is *strongest* — the value-stack element
+it shrinks, ~176 → ~80 B, still carried all the splice-copy traffic S1/S3
+have since removed): json_large **1.067×**, json_medium 1.030×, arith 1.02×,
+but json_small **0.923×** (the added per-node malloc isn't amortized on small
+trees), and the owned-tree `parse_floor` row was exactly flat (20.756 →
+20.755 ms). Mixed-sign, single-sample margins on the workload set, an extra
+allocation per node on the count frontier, and a public-enum change to buy it
+— **not landed**; post-S1/S3 the stack-memcpy it targets is smaller still.
+This closes the first spike's "measure both directions before believing
+either" item with evidence.
