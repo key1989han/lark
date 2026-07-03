@@ -1,10 +1,13 @@
 # Spike: parser-optimization hypotheses → measurements (2026-07-03)
 
-Throwaway measurement spike turning the recommendations of
-[`parser-optimization-research-2026-07.md`](parser-optimization-research-2026-07.md)
-into before/after numbers. Everything here is a *directional* experiment, not
-production code: the harnesses are feature-gated examples, the library hooks are
-spike-only `cfg` accessors, and nothing on the default build path changed.
+**Consolidated record of three parallel spikes** (PRs #616, #617, #618 — all run
+against the "Suggested benchmark tasks" of
+[`parser-optimization-research-2026-07.md`](parser-optimization-research-2026-07.md)).
+This branch (#617) is the canonical base; the one net-new result the siblings
+contributed — #616's viable SmallVec-of-child-*refs* design — is folded into the
+matrix below. Everything here is a *directional* experiment, not production code:
+the harnesses are feature-gated examples, the library hooks are spike-only `cfg`
+accessors, and nothing on the default build path changed.
 
 **Method.** Deterministic signals are the headline per BENCH.md: experiment 1
 gates on a token-stream differential (every variant must emit the byte-identical
@@ -92,12 +95,21 @@ Sub-findings, in decreasing order of surprise:
    by something the bake doesn't touch (its case-insensitive keyword `unless`
    retype probes, shared by all variants).
 
+**A measurement caution from the sibling spikes.** #616 and #618 benchmarked
+*hand-written* JSON scanners against the DFA and reported ~7× and ~12×
+scanner-only. Those numbers bundle grammar-specialization (a scanner hard-coded
+to JSON's token shapes) with the bake itself, don't generalize to a mechanical
+baker, and — quoted without the Amdahl dilution — overstate the lever. The
+same-automaton isolation here (~4×, ~6% end-to-end) is the number to plan by.
+
 **Takeaway.** The technique works exactly as the literature says, but at
 lark-rs's current profile the cheap slice worth considering is the *leaner drive
 loop* (finding 2) — and even that is bounded ~4% end-to-end. Re-rank the baked
-DFA behind the memory-layout levers below; revisit after the output path stops
-being allocation-bound (a 4× scanner is worth 25%+ once lexing is half the parse
-again).
+DFA behind the memory-layout levers below; it remains a real **one-shot /
+standalone** lever (baking also erases determinization from the build, and
+`include_lark!` could bake the table at compile time). Revisit after the output
+path stops being allocation-bound (a 4× scanner is worth 25%+ once lexing is
+half the parse again).
 
 ---
 
@@ -112,22 +124,39 @@ nodes (flat across the 56 KB → 2.4 MB sweep):
 | variant | allocs/node | Δ vs `parse()` | alloc bytes | wall-clock |
 |---|---:|---:|---:|---:|
 | `parse()` (label `String` + `Vec<Child>`/node) | 5.71 | — | 51.7 MB | 1.00× |
-| `intern` (label → `u32`) | 4.71 | **−1.000/node** | 43.9 MB | 1.25× |
-| `tape` (flat `nodes[]` + shared `kids[]`) | 4.72 | **−1.000/node** | 28.7 MB | 1.44× |
-| `intern+tape` | 3.72 | **−2.000/node** | 28.2 MB | **1.61×** |
-| `smallvec` (inline ≤2 children) | 7.08 | **+1.37/node** | 28.7 MB | 1.29× |
+| `intern` (label → `u32`) | 4.71 | **−1.000/node** | 43.9 MB | 1.21× |
+| `tape` (flat `nodes[]` + shared `kids[]`) | 4.72 | **−1.000/node** | 28.7 MB | 1.38× |
+| `intern+tape` | 3.72 | **−2.000/node** | 28.2 MB | **1.57×** |
+| `sv-nodes` (inline child *nodes*, ≤2) | 7.08 | **+1.37/node** | 28.7 MB | 1.10× |
+| `sv-refs` (arena + inline child *refs*, ≤4; from #616) | 4.74 | **−0.979/node** | 42.8 MB | 1.28× |
+
+(Wall-clock column re-measured in one back-to-back session; an earlier session
+put the same ordering ~3 points higher — trend noise, the alloc counts are
+identical.)
 
 The owned path pays the same **exactly 1.000 child-`Vec` allocation per internal
-node** the span path did, and the flat `kids[]` arena removes it for 1.44× — and,
+node** the span path did, and the flat `kids[]` arena removes it for ~1.4× — and,
 unlike on the span path, it also nearly **halves total allocated bytes** (the
 per-node `Vec<Child>` rows are the byte bulk of an owned parse).
 
-**SmallVec-inline children: KILLED.** Structural, not just quantitative: an
-inline child list cannot contain an unboxed recursive node (`SmallVec<[SChild; 2]>`
-inside the node is an infinite-size type — `Vec`'s heap pointer is what breaks
-the recursion in the default `Tree`), so the node (and the fat `Token`) must be
-boxed, trading the removed child-`Vec` for a per-node `Box`: net **+1.37
-allocs/node vs the default**, strictly dominated by `tape` on every axis.
+**SmallVec, two shapes with opposite verdicts (the M5 "third data point"):**
+
+- **Inline child *nodes*: KILLED**, structurally: an inline child list cannot
+  contain an unboxed recursive node (`SmallVec<[SChild; 2]>` inside the node is
+  an infinite-size type — `Vec`'s heap pointer is what breaks the recursion in
+  the default `Tree`), so the node (and the fat `Token`) must be boxed, trading
+  the removed child-`Vec` for a per-node `Box`: net **+1.37 allocs/node vs the
+  default**, dominated by `tape` on every axis.
+- **Inline child *refs*: VIABLE** — the design from parallel spike **#616**
+  (`tree_alloc_backends.rs`), reproduced here deterministically: node records in
+  an arena, children as `Copy` `u32` handles inline in a `SmallVec<[Ref; 4]>`.
+  The recursion goes through the handle, so nothing is boxed; only ~2% of nodes
+  (2 001/98 001) spill past the inline capacity, capturing **0.979 of the 1.000
+  child-`Vec` allocs/node**. In this session it trails the shared flat `kids[]`
+  on wall-clock (1.28× vs 1.38×) and on alloc *bytes* (each record carries 4
+  inline slots), so `tape` stays the recommendation — `sv-refs` is the fallback
+  when a single shared child buffer is undesirable (e.g. subtree-local
+  mutation).
 
 ---
 
@@ -135,8 +164,8 @@ allocs/node vs the default**, strictly dominated by `tape` on every axis.
 
 **Verdict: CONFIRMED, and it is near-free.** The `intern` row above: the label
 `String` is exactly **1.000 allocation per internal node** (−7.8 MB of the
-594 KB parse's churn), worth 1.25× wall-clock on its own — and the interned id
-is *already on the seam* (`OutputBuilder::reduce` receives the rule index;
+594 KB parse's churn), worth ~1.2–1.4× wall-clock on its own — and the interned
+id is *already on the seam* (`OutputBuilder::reduce` receives the rule index;
 `OutputContext` resolves names lazily), so an interned-label backend needs no
 new interner, just a node type that stores the `u32`.
 
@@ -144,7 +173,7 @@ new interner, just a node type that stores the `u32`.
 
 ## 4. Marginal stacking (research Part 3, open question 2)
 
-The two levers stack perfectly (−2.000 allocs/node, 1.61×), and what remains is
+The two levers stack perfectly (−2.000 allocs/node, ~1.6×), and what remains is
 now sharply identified: `intern+tape`'s residual **3.72 allocs/node ≈ 2 owned
 `String`s per kept token** (`Token.type_` + `Token.value`, ~1.85 kept
 tokens/node on this workload) plus O(log n) arena growth. So after M2+M5 the
@@ -154,17 +183,52 @@ where ownership is forced), exactly as the research ranked. Note `Token.type_`
 is pure redundancy on the hot path (the token already carries `type_id`); a
 value-less/interned-type token would remove one of the two by itself.
 
+**Triangulation.** M2 and M5 were independently reproduced by both parallel
+spikes (#616, #618) with agreeing numbers — #616 measured 1.000 / 0.999
+allocs/node and 1.36× / 1.69× / 1.82× (its session's ratios) for
+intern / flat-kids / stacked, on an independently written harness. Three
+harnesses, one answer: these two levers are real.
+
 ---
 
-## Artifacts
+## Cross-cutting gotchas (read these before the next pass at any of this)
 
-| file | role |
+1. **Flat `--full` opcode table > `--fast` goto/switch codegen, in Rust.** No
+   computed goto; a two-level `match` loses to one indexed load. Don't build a
+   Rust source emitter for scanners — bake data, not code.
+2. **SmallVec of child *nodes* is structurally impossible without boxing**
+   (infinite-size recursion) **and loses; SmallVec of child *refs* into an arena
+   is viable** (−0.979/node, ~2% spill) but still trails one shared flat
+   `kids[]`.
+3. **~Half the baked-scanner win is just a leaner drive loop** — no bake, no new
+   representation: hoist the per-position `Input`/start-state/prefilter work out
+   of `match_at`'s inner path (`raw` ≈ 2× the seam on the same automaton).
+4. **After M2+M5 the residual is owned token strings** (→ M6 next), and
+   `Token.type_` is redundant with `type_id` — one of the two per-token
+   `String`s can go without any zero-copy machinery.
+
+---
+
+## Artifacts: the durable instrument vs the throwaway
+
+**Durable instrument** — the parts that must survive for the baked-DFA lever to
+be re-measurable when it is revisited (the numbers depend on these being
+faithful, and the docs alone cannot reconstruct them):
+
+| piece | why it's load-bearing |
 |---|---|
-| `examples/baked_dfa_lex.rs` | experiment 1 harness (differential + timing), JSON sweep + wild bank |
-| `examples/bake_dfa_gen.rs` → `examples/baked/json_dfa.rs` | goto/switch codegen (`gen` variant) |
-| `src/lexer/{dfa,mod}.rs` `baked-dfa-spike` accessors | spike-only exposure of the plain dense DFA + retype seam |
-| `examples/owned_tree_layout_alloc.rs` | experiments 2–4 (owned-output layout matrix) |
+| `bake()` (in `baked_dfa_lex.rs` / `bake_dfa_gen.rs`) | BFS flattening of the *real* dense DFA, incl. the **start-state context-sensitivity probe** (a look-behind-conditioned start state falsifies a single baked start — this is what disqualified pyquil) and the **delayed-by-one match / EOI-transition handling** that makes the baked semantics byte-identical |
+| `spike_plain_dense` / `spike_retype` (`src/lexer/{dfa,mod}.rs`, behind `baked-dfa-spike`) | the only way to get the *production* automaton + the seam's `unless` retype out of the engine, so a variant measures the real thing and not a rebuilt approximation |
+| `raw_match_at` (`baked_dfa_lex.rs`) | the no-bake leaner-drive-loop baseline (gotcha 3) — the first thing to prototype in-engine |
+| `load_wild` + its SKIP taxonomy (`baked_dfa_lex.rs`) | maps exactly which real grammars a naive bake covers and *why* each of the others is out (guarded engine / fence / hybrid overflow / context-sensitive start / non-LALR) |
+| `owned_tree_layout_alloc.rs` | the owned-path layout matrix: counting allocator + node-count equality, one builder per lever, incl. both SmallVec shapes |
+
+**Throwaway** — `bake_dfa_gen.rs` + the generated `examples/baked/json_dfa.rs`
+(the goto/switch `gen` variant) exist only to prove the *negative* in gotcha 1.
+They are kept because keeping them green is free (behind the default-off
+`baked-dfa-spike` feature, never built by CI or the fast gate) and deleting them
+would make that negative unreproducible; if they ever cost maintenance, delete
+them — the finding stands recorded here.
 
 All library hooks are behind the default-off `baked-dfa-spike` feature; the
-default build is unchanged. The examples are re-runnable as committed; delete
-the feature + examples together when the spike's conclusions are absorbed.
+default build is unchanged.

@@ -18,9 +18,12 @@
 //!   of `TapeTree`). Isolates the per-node child `Vec`.
 //! * **intern+tape** — both levers stacked: remaining allocations are the
 //!   lexer's owned token strings plus O(log n) arena growth.
-//! * **smallvec** — label `String` kept, children in a `SmallVec<[_; 2]>`
-//!   (inline up to 2, spill to heap above) — the inline-children third data
-//!   point M5 asks for.
+//! * **sv-nodes** — label `String` kept, child *nodes* inline in a
+//!   `SmallVec<[_; 2]>` — the naive inline-children shape (killed: the recursion
+//!   forces a `Box` per node, see the type's doc).
+//! * **sv-refs** — the *viable* SmallVec design (harvested from the parallel
+//!   spike PR #616): node records in an arena, child *refs* (`Copy` `u32`
+//!   handles) inline in a `SmallVec<[Ref; 4]>`, spilling only above arity 4.
 //!
 //! Each variant reports real heap allocations (counting global allocator),
 //! allocs per internal node, and a wall-clock trend. Node counts are asserted
@@ -236,15 +239,17 @@ impl<'i, const L: bool> OutputBuilder<'i> for TapeOwnedBuilder<L> {
     }
 }
 
-/// M5 third data point: default shape with an inline-capacity-2 `SmallVec`
-/// child list (label `String` kept, so the delta vs `parse()` is child-list-only).
+/// M5 third data point, inline-NODES form: default shape with an
+/// inline-capacity-2 `SmallVec` child list (label `String` kept, so the delta vs
+/// `parse()` is child-list-only).
 ///
 /// Structural catch (a finding in itself): an *inline* child list cannot hold an
 /// unboxed recursive node — `SmallVec<[SChild; 2]>` inside `STree` inside `SChild`
 /// is an infinite-size type, where the default `Vec<Child>` breaks the cycle with
 /// its heap pointer. The recursion must go through some indirection, so the node
 /// (and the fat `Token`) get boxed — i.e. SmallVec-inline children trade the
-/// per-node child-`Vec` allocation for a per-node `Box` allocation.
+/// per-node child-`Vec` allocation for a per-node `Box` allocation. The viable
+/// SmallVec design is the handle model below ([`SmallVecRefsBuilder`]).
 enum SChild {
     Tree(Box<STree>),
     Token(Box<Token>), // boxed so the inline SmallVec doesn't balloon the parent
@@ -290,6 +295,68 @@ fn count_stree(root: &SChild) -> u64 {
         }
     }
     n
+}
+
+/// M5 third data point, inline-REFS form (harvested from the parallel spike
+/// PR #616, `tree_alloc_backends.rs`): the *viable* SmallVec design. Node records
+/// live in an arena `Vec`; each record holds its child list as an inline
+/// `SmallVec<[Ref; 4]>` of `Copy` handles into the arena — the recursion goes
+/// through the `u32` handle, so nothing needs boxing, and only a node with > 4
+/// children spills to the heap. Label `String` kept, so the delta vs `parse()`
+/// is child-list-only (comparable to `tape`, which stores the refs in one shared
+/// `kids[]` instead of inline per record).
+#[derive(Clone, Copy)]
+enum Ref {
+    Tree(u32),
+    Token(u32),
+    None,
+}
+struct RNode {
+    label: String,
+    kids: SmallVec<[Ref; 4]>,
+    meta: Meta,
+}
+struct SmallVecRefsBuilder {
+    records: Vec<RNode>,
+    tokens: Vec<Token>,
+    spilled: u64, // nodes whose child list exceeded the inline capacity
+}
+impl SmallVecRefsBuilder {
+    fn new() -> Self {
+        SmallVecRefsBuilder {
+            records: Vec::new(),
+            tokens: Vec::new(),
+            spilled: 0,
+        }
+    }
+}
+impl<'i> OutputBuilder<'i> for SmallVecRefsBuilder {
+    type Value = Ref;
+    fn token(&mut self, token: Token, _input: &'i str, _ctx: &OutputContext) -> Ref {
+        self.tokens.push(token);
+        Ref::Token(self.tokens.len() as u32 - 1)
+    }
+    fn reduce(
+        &mut self,
+        rule: usize,
+        children: &mut Vec<Ref>,
+        meta: &Meta,
+        ctx: &OutputContext,
+    ) -> Ref {
+        let kids: SmallVec<[Ref; 4]> = children.drain(..).collect();
+        if kids.spilled() {
+            self.spilled += 1;
+        }
+        self.records.push(RNode {
+            label: ctx.callback_name(rule).to_string(),
+            kids,
+            meta: meta.clone(),
+        });
+        Ref::Tree(self.records.len() as u32 - 1)
+    }
+    fn placeholder(&mut self, _ctx: &OutputContext) -> Ref {
+        Ref::None
+    }
 }
 
 fn count_internal_nodes(root: &Tree) -> u64 {
@@ -395,7 +462,20 @@ fn main() {
         let (a, b) = snapshot();
         assert_eq!(count_stree(&v), n0, "smallvec: node count diverges");
         drop(v);
-        row("smallvec", a, b);
+        row("sv-nodes", a, b);
+
+        let mut rb = SmallVecRefsBuilder::new();
+        let _ = snapshot();
+        let root = parser.parse_into(&input, &mut rb).unwrap();
+        let (a, b) = snapshot();
+        black_box(root);
+        assert_eq!(rb.records.len() as u64, n0, "sv-refs: node count diverges");
+        let spilled = rb.spilled;
+        drop(rb);
+        row("sv-refs", a, b);
+        println!(
+            "  (sv-refs spilled {spilled} of {internal_nodes} nodes past the inline capacity)"
+        );
         println!();
     }
 
@@ -451,9 +531,17 @@ fn main() {
             }),
         ),
         (
-            "smallvec",
+            "sv-nodes",
             Box::new(|| {
                 black_box(parser.parse_into(&input, &mut SmallVecBuilder).unwrap());
+            }),
+        ),
+        (
+            "sv-refs",
+            Box::new(|| {
+                let mut b = SmallVecRefsBuilder::new();
+                black_box(parser.parse_into(&input, &mut b).unwrap());
+                black_box(&b.records);
             }),
         ),
     ];
