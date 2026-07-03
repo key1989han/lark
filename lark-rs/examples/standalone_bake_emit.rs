@@ -1,16 +1,21 @@
 //! THROWAWAY SPIKE (L5 standalone-bake spike, 2026-07-03): emit the Part-B
 //! generated-crate variants for issue #620 — a STOCK standalone parser (regex-crate
-//! `Scanner`) and two BAKED copies (flat `u32[state*256]` table and byte-class-
-//! compressed table) that splice a static-table interpreter into the *same* generated
-//! runtime, dropping the `regex` dependency. Compiling these three crates is how the
-//! spike measures binary size, rustc compile time, and one-shot vs reused parse.
+//! `Scanner`) and three BAKED copies that splice a static-table interpreter into the
+//! *same* generated runtime, dropping the `regex` dependency:
+//!   * `baked`          — flat `u32[state*256]` table (L5b)
+//!   * `baked_interned` — flat table PLUS the L5d intern half: `Token::type_` /
+//!                        `Tree::data` retyped `String → &'static str` (names are already
+//!                        `&'static` in the baked DATA), dropping the `.to_string()` copies
+//!   * `baked_classed`  — byte-class-compressed table (L5c)
+//! Compiling these four crates is how the spike measures binary size, rustc compile time,
+//! one-shot vs reused parse, and (with the harness's counting allocator) allocs/parse.
 //!
 //! ```text
 //! cargo run --release --features baked-dfa-spike --example standalone_bake_emit -- \
 //!     <grammar.lark> <start> <out_dir>
 //! ```
-//! Writes `<out_dir>/{stock,baked,baked_classed}.rs`. Correctness is gated downstream
-//! by the driver script (token stream + tree vs the in-process oracle).
+//! Writes `<out_dir>/{stock,baked,baked_interned,baked_classed}.rs`. Correctness is gated
+//! downstream by the driver script (token stream + tree digest vs the in-process oracle).
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -205,6 +210,44 @@ impl Scanner {{
     )
 }
 
+/// L5d intern half: retype `Token::type_` and `Tree::data` from `String` to
+/// `&'static str` (they come straight from the baked `&'static` symbol/rule tables —
+/// `name_of` returns `&'static str`, `RuleData::tree_name` is `&'static str`), and drop
+/// the three `.to_string()` copies (the lexer's per-token `type_`, the EOI token's
+/// `type_`, and the node's `data`). `run` clones every shifted token onto the value
+/// stack, so the per-token `type_` was allocated **twice**; both go. Rendered form is
+/// byte-identical, so the oracle tree digest is unchanged (the correctness gate).
+fn internize(baked_flat: &str) -> String {
+    let subs = [
+        ("    pub type_: String,", "    pub type_: &'static str,"),
+        ("    pub data: String,", "    pub data: &'static str,"),
+        // The manual `Clone for Tree` builds an explicit-frame stack whose `Frame`
+        // struct mirrors `Tree.data` (12-space indent, no `pub` — unique to `Frame`).
+        (
+            "            data: String,",
+            "            data: &'static str,",
+        ),
+        (
+            "type_: data.name_of(id).to_string(),",
+            "type_: data.name_of(id),",
+        ),
+        (
+            "type_: data.name_of(0).to_string(),",
+            "type_: data.name_of(0),",
+        ),
+        ("data: rule.tree_name.to_string(),", "data: rule.tree_name,"),
+    ];
+    let mut out = baked_flat.to_string();
+    for (from, to) in subs {
+        assert!(
+            out.contains(from),
+            "internize: expected splice anchor not found: {from:?}"
+        );
+        out = out.replace(from, to);
+    }
+    out
+}
+
 fn splice(stock: &str, scanner_src: &str) -> String {
     let start = stock
         .find("struct Scanner {")
@@ -287,7 +330,14 @@ fn main() {
         (bp, be)
     }"#;
     let baked_src = format!("{tables_flat}\n{}", baked_scanner_common(scan_flat));
-    std::fs::write(out_dir.join("baked.rs"), splice(&stock, &baked_src)).unwrap();
+    let baked_flat = splice(&stock, &baked_src);
+    std::fs::write(out_dir.join("baked.rs"), &baked_flat).unwrap();
+
+    // 2b) baked + L5d intern half: `Token::type_` / `Tree::data` → `&'static str`
+    //     (the names are already `&'static` in the baked DATA; no interner). Drops the
+    //     two `.to_string()` copies per shifted token + one per node. First measured by
+    //     the #622 spike; ported here so the reusable splice lives on the canonical branch.
+    std::fs::write(out_dir.join("baked_interned.rs"), internize(&baked_flat)).unwrap();
 
     // 3) byte-class compressed
     let tables_classed = format!(
@@ -333,7 +383,7 @@ fn main() {
     .unwrap();
 
     println!(
-        "emitted stock.rs ({} B), baked.rs, baked_classed.rs to {} ({} states, {} classes)",
+        "emitted stock.rs ({} B), baked.rs, baked_interned.rs, baked_classed.rs to {} ({} states, {} classes)",
         stock.len(),
         out_dir.display(),
         baked.n_states,

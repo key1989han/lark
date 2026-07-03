@@ -2,16 +2,18 @@
 #
 # THROWAWAY SPIKE (L5 standalone-bake spike, 2026-07-03) — Part B driver for #620.
 #
-# Builds three self-contained generated-parser crates for one grammar and measures the
+# Builds four self-contained generated-parser crates for one grammar and measures the
 # numbers the epic asks for on real artifacts:
 #   * stock          — the current generated parser (regex-crate Scanner)
-#   * baked          — flat u32[state*256] static table, regex dependency DROPPED
-#   * baked_classed  — byte-class-compressed static table, regex dependency DROPPED
+#   * baked          — flat u32[state*256] static table, regex dependency DROPPED (L5b)
+#   * baked_interned — baked + L5d intern half (type_/data -> &'static str, no copies)
+#   * baked_classed  — byte-class-compressed static table, regex dependency DROPPED (L5c)
 #
 # Per crate: cold build time (incl. deps), warm crate rebuild time, release binary size
 # (raw + stripped, + .text/.rodata via `size`), one-shot parse (fresh Parser + first
-# parse), reused parse throughput, and a structural tree digest. Asserts the three
-# digests agree AND equal the in-process basic-lexer oracle digest.
+# parse), reused parse throughput, allocs-per-parse (counting global allocator), and a
+# structural tree digest. Asserts all four digests agree AND equal the in-process
+# basic-lexer oracle digest, and reports the baked->baked_interned allocation delta.
 #
 # Usage: standalone_bake_partb.sh <grammar.lark> <start> <records|workload-file> [workdir]
 set -euo pipefail
@@ -50,10 +52,23 @@ echo "workload: $WBYTES bytes"
 ( cd "$LARK_RS" && cargo run --release --quiet --features baked-dfa-spike \
     --example standalone_bake_emit -- "$GRAMMAR" "$START" "$WORK/gen" )
 
-# 3) shared harness main.rs (identical for all three crates; only gen.rs differs).
+# 3) shared harness main.rs (identical for all crates; only gen.rs differs).
 cat > "$WORK/main.rs" <<'RS'
 include!("gen.rs");
 use std::time::{Duration, Instant};
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
+// Counting global allocator: alloc-block count is the deterministic L5d signal
+// (BENCH.md). Counts alloc() calls only, so the baked→interned delta is the removed
+// `String` copies (labels + double-`type_`), independent of dealloc timing.
+static ALLOCS: AtomicU64 = AtomicU64::new(0);
+struct Counting;
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 { ALLOCS.fetch_add(1, Ordering::Relaxed); System.alloc(l) }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) { System.dealloc(p, l) }
+}
+#[global_allocator]
+static GA: Counting = Counting;
 fn push(h: &mut u64, b: &[u8]) { for &x in b { *h ^= x as u64; *h = h.wrapping_mul(0x100000001b3); } }
 fn walk(t: &Tree, h: &mut u64, n: &mut u64) {
     *n += 1; push(h, b"T"); push(h, t.data.as_bytes()); push(h, b"(");
@@ -100,14 +115,22 @@ fn main() {
     let oneshot_ns = t0.elapsed().as_nanos();
     let (digest, nodes) = canon(&tree0);
     let p = Parser::new();
+    // Allocation count for exactly one parse (L5d deterministic signal). Measured
+    // outside the timing loop; count alloc() calls from just before parse to just
+    // after (tree still alive), so the number is allocations, not net.
+    let a0 = ALLOCS.load(Ordering::Relaxed);
+    let tree_a = p.parse(&text).expect("parse");
+    let allocs = ALLOCS.load(Ordering::Relaxed) - a0;
+    drop(tree_a);
     let (med, min) = measure(|| { let _ = p.parse(&text).expect("parse"); });
     let mbps = text.len() as f64 / med * 1e3;
-    println!("RESULT one_shot_ns={} reused_med_ns={:.0} reused_min_ns={:.0} mb_s={:.1} nodes={} digest={:016x} bytes={}",
-        oneshot_ns, med, min, mbps, nodes, digest, text.len());
+    println!("RESULT one_shot_ns={} reused_med_ns={:.0} reused_min_ns={:.0} mb_s={:.1} nodes={} allocs={} digest={:016x} bytes={}",
+        oneshot_ns, med, min, mbps, nodes, allocs, digest, text.len());
 }
 RS
 
 DIGESTS=()
+ALLOCS_ARR=()
 build_and_run () {
     local name="$1" gen="$2" deps="$3"
     local crate="$WORK/$name"
@@ -152,7 +175,9 @@ TOML
     # run
     local out; out=$("$bin" "$WORK/workload.json")
     local dg; dg=$(echo "$out" | grep -o 'digest=[0-9a-f]*' | cut -d= -f2)
+    local al; al=$(echo "$out" | grep -o 'allocs=[0-9]*' | cut -d= -f2)
     DIGESTS+=("$name:$dg")
+    ALLOCS_ARR+=("$name:$al")
     printf '\n== %s ==\n' "$name"
     printf '  build:   cold %6.2fs   warm-rebuild %6.2fs\n' "$cold" "$warm"
     printf '  binary:  raw %8d B   stripped %8d B\n' "$raw" "$stripped"
@@ -160,9 +185,10 @@ TOML
     printf '  %s\n' "$out"
 }
 
-build_and_run stock         stock.rs          'regex = "1.10"'
-build_and_run baked         baked.rs          ''
-build_and_run baked_classed baked_classed.rs  ''
+build_and_run stock          stock.rs          'regex = "1.10"'
+build_and_run baked          baked.rs          ''
+build_and_run baked_interned baked_interned.rs ''
+build_and_run baked_classed  baked_classed.rs  ''
 
 # 4) in-process oracle digest.
 echo
@@ -179,3 +205,17 @@ for entry in "${DIGESTS[@]}"; do
     if [ "$dg" = "$ODG" ]; then echo "  OK   $name digest == oracle ($dg)"; else echo "  FAIL $name digest $dg != oracle $ODG"; ok=0; fi
 done
 [ "$ok" = 1 ] && echo "  ✅ all variants tree-identical to the in-process oracle" || { echo "  ❌ digest mismatch"; exit 1; }
+
+echo
+echo "== L5d intern allocation delta (allocs per parse) =="
+declare -A AL
+for entry in "${ALLOCS_ARR[@]}"; do AL["${entry%%:*}"]="${entry#*:}"; done
+for n in stock baked baked_interned baked_classed; do
+    printf '  %-14s allocs/parse = %s\n' "$n" "${AL[$n]:-?}"
+done
+if [ -n "${AL[baked]:-}" ] && [ -n "${AL[baked_interned]:-}" ]; then
+    delta=$(( ${AL[baked]} - ${AL[baked_interned]} ))
+    echo "  intern removes ${delta} allocs/parse (baked → baked_interned)"
+    echo "  expected closed-form: tokens_incl_EOI + shifted_tokens + tree_nodes"
+    echo "  (JSON 594 KB: 132002 + 132001 + 98001 = 362004)"
+fi

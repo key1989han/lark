@@ -22,8 +22,9 @@ changed. **Only ratios travel** (shared Linux x86_64 box, release + LTO), per BE
 > sized against), and baking **drops the `regex` dependency**, so binary size and compile
 > time *invert* from costs into gains. Net-new to each: **#623** (this note) implemented
 > the regex-free `unless` retype so the dep drops even for keyword grammars, measured the
-> full generate→compile→size loop with an oracle-digest correctness gate, and found the
-> O(n²) `tok+` bug; **#622** measured the L5d intern half with an exact allocation
+> full generate→compile→size loop with an oracle-digest correctness gate, found the
+> O(n²) `tok+` bug, and **ports + re-measures the L5d intern half** (the `baked_interned`
+> variant); **#622** first measured the L5d intern half with an exact allocation
 > closed-form and caught the matter_idl binary-*grows* exception (regex kept for ci
 > keywords); **#621** framed the post-bake parser as **output-bound**. Where a figure is
 > cited from a sibling rather than re-measured here, it is marked as such.
@@ -247,28 +248,39 @@ in-process finding exactly: after the lexer is fixed, the generated parser is
 *not* more scanner work. It is also why the standalone reused throughput is ~in-process
 `parse()` parity, not a new tier — see the scope correction below.
 
-## L5d — interned / tape output — **verdict: intern half CONFIRMED (measured by #622); tape unmeasured**
+## L5d — interned / tape output — **verdict: intern half CONFIRMED (re-measured on this branch); tape unmeasured**
 
-Not re-measured on this branch (#623): adding an `interned` variant to the emit path means
-retyping `Token::type_`/`Tree::data` to `&'static str`, which ripples through the runtime's
-`Tree`/`Child`/`Display`/`ContainerSpan` — >1 h of mirror surgery and error-prone — so per
-the spike brief's escape hatch this is **reproduced-by-sibling #622, cited not
-re-measured**. What #622 measured (and this note verified against the runtime source):
+**Re-measured on this branch** (the `baked_interned` emit variant — first found by #622,
+whose measurement this reproduces). `standalone_bake_emit.rs` now emits a fourth variant:
+the flat-table baked scanner **plus** the intern change — `Token::type_` and `Tree::data`
+retyped `String → &'static str`, threaded through the runtime's `Tree`/`Frame`/`Display`,
+and the three `.to_string()` copies dropped (`internize()`, a 6-anchor splice on the
+generated source). Measured by the counting allocator in the Part B harness, 594 KB JSON:
 
+| variant | allocs/parse | Δ vs baked | reused | digest |
+|---|---:|---:|---:|---|
+| baked (flat) | 948 031 | — | 8.3 MB/s | `b596…d98b` |
+| **baked_interned** | **586 027** | **−362 004** | **9.9 MB/s (1.19× over baked, 1.86× over stock)** | `b596…d98b` (identical) |
+
+- **The closed form holds exactly: −362 004 = `tokens_incl_EOI + shifted_tokens +
+  tree_nodes` = 132 002 + 132 001 + 98 001.** Same number #622 reported, now confirmed on
+  this branch's own harness.
 - **Interning is *free* on the standalone surface** — symbol names and rule tree-names are
-  already `&'static str` in the baked `DATA`, so `Token::type_`/`Tree::data` can simply
-  stop copying them (no interner, unlike in-process M2).
-- **Exact allocation closed-form: `−(tokens_incl_EOI + shifted_tokens + tree_nodes)`** —
-  json **−362 004** (132 002 + 132 001 + 98 001), matter_idl −790, poetry_markers −238,
-  at **1.10–1.23×** wall-clock. The extra `shifted_tokens` term (vs in-process M2's
-  −1/node) is **standalone-specific and verified here against `runtime.rs`**: `run` does
-  `value_stack.push(NodeValue::Token(token.clone()))`, so a shifted token's `type_`
-  `String` is allocated in `lex` *and again* on the clone onto the value stack — **two
-  allocations per shifted token**, both removed by interning.
-- The residual owned `String` per token is then `value` (M6 territory), same as in-process.
+  already `&'static str` in the baked `DATA`, so `Token::type_`/`Tree::data` just stop
+  copying them (no interner, unlike in-process M2). The rendered form is byte-identical, so
+  the oracle tree digest is **unchanged** (`b596…d98b` across stock/baked/interned/classed)
+  — the correctness gate that the `&'static` threading did not break output.
+- **The `shifted_tokens` term is standalone-specific** (vs in-process M2's −1/node), and
+  verified here against `src/standalone/runtime.rs`: `run` does
+  `value_stack.push(NodeValue::Token(token.clone()))`, so a shifted token's `type_` `String`
+  is allocated in `lex` *and again* on the clone onto the value stack — **two allocations
+  per shifted token**, both removed by interning. (Credit #622 for the original observation.)
+- Wall-clock **1.19× over baked** here — squarely in #622's 1.10–1.23× band; the residual
+  owned `String` per token is then `value` (M6 territory), same as in-process.
 
-**Tape (M5) is unmeasured by all three spikes.** #620 can decide L5d's intern half now (free,
-confirmed, exact); the tape half rides #619's default-`Tree` decision.
+**Tape (M5) remains unmeasured by all three spikes.** #620 can decide L5d's intern half now
+(free, confirmed, exact, oracle-identical); the tape half rides #619's default-`Tree`
+decision.
 
 ### Incidental out-of-scope find — filed as its own issue
 
@@ -344,7 +356,7 @@ aspirational, untested, and a substantially bigger program than #620.
 | **L5a** leaner loop | **N/A as specified** — stock is regex-crate, not a DFA; win is only reachable via L5b | raw = 13.9× rx (2× the seam), but not shippable without the bake |
 | **L5b** flat-table bake | **CONFIRMED, cost model inverted** | 1.76× large-input parse; **27× one-shot** small-input; **binary 4.1× smaller**, **compile 4.1× faster** (regex dep dropped); tree-identical to oracle |
 | **L5c** footprint | **byte-class is the default** | ~5% throughput giveback for 1.5–4.9× smaller table; **×1 multiplier, 14–105 KiB/grammar**, dependency-free |
-| **L5d** intern / tape | **intern half CONFIRMED** (measured by #622, cited); tape unmeasured | intern is free + exact: `−(tokens+shifted_tokens+tree_nodes)` allocs (json −362 004), 1.10–1.23× |
+| **L5d** intern / tape | **intern half CONFIRMED** (re-measured here via `baked_interned`, first found by #622); tape unmeasured | intern is free + exact: **−362 004** allocs/parse (= tokens+shifted+tree_nodes), 1.19× over baked, oracle-identical |
 
 **Net.** #620's two costed risks — rodata footprint and compile time — are **not costs on
 the standalone surface; they are gains**, because baking a table lets the generated parser
@@ -377,9 +389,9 @@ from the standalone framing; they do not reproduce.
 |---|---|
 | `examples/standalone_bake_probe.rs` | bakeable set + per-scanner footprint (flat/byte-class/`to_bytes`), the ×1-multiplier table |
 | `examples/standalone_bake_lex.rs` | scanner-rep throughput ladder incl. the **rx** (stock standalone) baseline + byte-class rep; token-stream differential gate; one-shot build costs |
-| `examples/standalone_bake_emit.rs` | emits stock + baked-flat + baked-byte-class generated crates by splicing a static-table interpreter into the runtime and dropping `regex` |
+| `examples/standalone_bake_emit.rs` | emits stock + baked-flat + **baked-interned (L5d)** + baked-byte-class generated crates by splicing a static-table interpreter into the runtime, dropping `regex`, and (interned) retyping `type_`/`data` to `&'static str` |
 | `examples/standalone_oracle_digest.rs` | in-process basic-lexer oracle digest (Part B correctness anchor) — *not* spike-gated |
-| `examples/standalone_bake_partb.sh` | Part B driver: emit → compile 3 crates → binary size / compile time / one-shot / reused / digest gate |
+| `examples/standalone_bake_partb.sh` | Part B driver: emit → compile 4 crates → binary size / compile time / one-shot / reused / **allocs-per-parse (counting allocator)** / digest gate |
 
 Durable instrument reused verbatim from PR #617: `bake()` (BFS flatten + start-context
 probe + delayed-match/EOI), the `spike_plain_dense` / `spike_retype` accessors
