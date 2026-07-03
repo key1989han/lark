@@ -136,6 +136,28 @@ name = "bake_dfa_gen"
 path = "examples/bake_dfa_gen.rs"
 required-features = ["baked-dfa-spike"]
 
+# THROWAWAY SPIKE (L5 standalone-bake spike 2026-07-03, docs/notes/). Reuses the
+# baked-dfa-spike accessors; delete with the spike.
+[[example]]
+name = "standalone_bake_probe"
+path = "examples/standalone_bake_probe.rs"
+required-features = ["baked-dfa-spike"]
+
+[[example]]
+name = "standalone_bake_lex"
+path = "examples/standalone_bake_lex.rs"
+required-features = ["baked-dfa-spike"]
+
+[[example]]
+name = "standalone_bake_emit"
+path = "examples/standalone_bake_emit.rs"
+required-features = ["baked-dfa-spike"]
+
+# In-process oracle digest for the Part-B correctness gate (no spike feature needed).
+[[example]]
+name = "standalone_oracle_digest"
+path = "examples/standalone_oracle_digest.rs"
+
 # The L0 whole-lexer differential needs the fancy-oracle reference backend (the
 # `Regex` backend's historical fancy side-probes) — meaningless against the lowered
 # probes, which share the machinery under test. CI and check.sh run it BY NAME
