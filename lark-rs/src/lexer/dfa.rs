@@ -804,6 +804,46 @@ fn plain_start_bytes(src: &str) -> Option<Box<[bool; 256]>> {
     Some(set)
 }
 
+// ─── SPIKE-ONLY accessors (`baked-dfa-spike`, THROWAWAY) ────────────────────
+//
+// Parser-optimization spike 2026-07-03 (`docs/notes/`): expose the plain engine's
+// dense DFA so an example can extract a baked (flat-table / generated goto-switch)
+// copy of the *same* automaton and measure the interpretation overhead in
+// isolation. Not a public commitment; delete with the spike.
+#[cfg(feature = "baked-dfa-spike")]
+impl DfaScanner {
+    /// The plain engine's dense DFA plus the `local PatternID → terminal id` map,
+    /// or `None` unless this scanner is *purely* that one dense engine (no guarded
+    /// engine, no fences, no hybrid overflow) — the precondition for the baked-DFA
+    /// experiment to be a clean isolation. `unless` retyping may still be present;
+    /// the caller re-applies it via [`spike_retype`](Self::spike_retype).
+    pub(super) fn spike_plain_dense(&self) -> Option<(&dense::DFA<Vec<u32>>, Vec<SymbolId>)> {
+        if self.guarded.is_some() || !self.fences.is_empty() {
+            return None;
+        }
+        let p = self.plain.as_ref()?;
+        if p.overflow.is_some() {
+            return None;
+        }
+        let dfa = match &p.dfa {
+            CombinedDfa::Dense(d) => d,
+            CombinedDfa::Hybrid { .. } => return None,
+        };
+        let ids = p.globals.iter().map(|&g| p.map[g].0).collect();
+        Some((dfa, ids))
+    }
+
+    /// The `unless` retype `match_at` applies to a winning `(id, value)` — exposed
+    /// so a baked driver reproduces the seam's output byte-for-byte.
+    pub(super) fn spike_retype(&self, id: SymbolId, value: &str) -> SymbolId {
+        self.unless
+            .get(id.index())
+            .and_then(|m| m.as_ref())
+            .and_then(|m| m.retype(value))
+            .unwrap_or(id)
+    }
+}
+
 /// **One lookaround terminal, matched alone** — the per-terminal analogue of the
 /// combined [`DfaScanner`], for engines that match terminals individually: the Earley
 /// dynamic lexer ([`DynamicMatcher`](super::dynamic::DynamicMatcher)) and the
