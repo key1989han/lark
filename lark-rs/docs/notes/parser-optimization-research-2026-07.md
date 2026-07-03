@@ -16,11 +16,24 @@ beats the cubic worst case the binarized-SPPF Earley already achieves. That
 *confirms the profiling verdict*: the remaining wins are **constant factors —
 lexer throughput and memory/allocation layout — not algorithms.**
 
+*Scope of "no headroom": this is a claim about **asymptotic** bounds, not
+constant factors. Generalized-LR families (GLR/RNGLR/BRNGLR) can be materially
+faster than Earley **in practice** on real grammars (empirical comparisons put
+GLR at roughly a low-single-digit slowdown vs. LR(1) on deterministic input) —
+so "the algorithmic axis is exhausted" means "no better bound is available,"
+**not** "no constant-factor challenger exists." A pivot to GLR would need
+benchmark proof against lark-rs's own SPPF-Earley, not just an asymptotic
+argument; it is out of scope here, flagged as a possible future experiment.*
+
 The concrete levers, ranked by fit to the measured bottleneck:
 
 1. **Lexer: directly-executable / baked DFA** (RE/flex `--full`/`--fast` model) —
-   the most on-target lever for the ~55% of instructions in the lexer, and it fits
-   the existing table-interpreted `regex-automata` DFA + standalone-codegen story.
+   the best *first experiment* for the ~55% of instructions in the lexer: it fits
+   the existing table-interpreted `regex-automata` DFA + standalone-codegen story
+   and carries the least risk. It is a hypothesis to benchmark against the current
+   backend on the real corpus, **not** a proven win — RE/flex's own baked-DFA
+   evidence shows the *technique* works, not that lark-rs's DFA will beat
+   `regex-automata` on reused-parser throughput.
 2. **Lexer: SIMD / data-parallel classification** (simdjson, SIMD sub-lexer,
    SIMD-DFA) — the largest *demonstrated* multipliers (3–12×), but a hand-vectorized
    rewrite, not a tune of the current DFA.
@@ -44,7 +57,7 @@ The concrete levers, ranked by fit to the measured bottleneck:
 |---|---|---|
 | **LALR(1)** | `parsers/lalr.rs` | *True* LALR(1) (spontaneous-generation + propagation lookaheads, not SLR FOLLOW). **Sparse** parse table: per-state `(terminal-id, action)` rows sorted ascending, linear-scanned (`action_at`/`goto_at`), O(filled) not O(states×terminals) — no hashing on the hot path (#367). |
 | **Earley** | `parsers/earley/` | Binarized **SPPF** (Elizabeth Scott), arena-allocated by `NodeId`. **Joop-Leo** deterministic-reduction-path optimization with **lazy, reachability-bounded** spine reconstruction (`load_leo_paths`) → right recursion O(n²)→O(n). Per-column **`waiting` index** → completer O(matches) not O(column). Dynamic lexer for the general path. |
-| **CYK** | `parsers/cyk.rs` | CNF conversion (TERM/BIN/UNIT + ε-removal) + O(n³·\|grammar\|) DP. Niche/last-resort backend. |
+| **CYK** | `parsers/cyk.rs` | CNF conversion (TERM/BIN/UNIT + nullable handling) + O(n³·\|grammar\|) DP. Like Python Lark's CYK it **rejects ε-producing user rules** (#101/ADR-0024) while refilling omitted values for the *generated* nullable helpers it does accept — "ε-removal" is the CNF machinery for the supported cases, not general ε support. Niche/last-resort backend. |
 
 ### Lexer
 
@@ -56,7 +69,7 @@ The concrete levers, ranked by fit to the measured bottleneck:
 ### Optimizations already landed
 
 - **Interning** to `Copy` integer `SymbolId`; semantics are dense **flag arrays**, never name-prefix sniffing (engine never inspects a name).
-- **Hot-path pass** (2026-07-01): removed per-token `String` clones (token was materialized 3×), four per-token **SipHash** probes → dense arrays, per-reduction `drain().collect()` and child-buffer reallocs. **~1.68× geomean** on synthetic LALR.
+- **Hot-path pass** (2026-07-01, E1/E2/E3/E5; PR #601): removed the *redundant* per-token `String` clones (each token was materialized 3× — built, cloned on `peek`, cloned into the builder — now 1×; the token is still owned on the default path, only the span/tape modes make it value-less), four per-token **SipHash** probes → dense arrays, the per-reduction `drain().collect()` intermediate `Vec`, and the child-buffer growth reallocs. **~1.68× geomean** on synthetic LALR. *These landed on the default `parse()` path specifically: `parse()` → `LalrParser::run` → `run_into` → `shape_reduction` (the value-parametric loop `parse`/`parse_into`/`parse_span`/`parse_tape` all share, ADR-0029 fork 2). The separate `ParserStack::reduce` still carries a `drain().collect()`, but it drives **only** the recovery and interactive parsers, not batch `parse()` — an easy two-path trip if you grep for `drain` and stop at the first hit.*
 - **Lexer capture pass** (2026-06-04): capture-group resolved by **index at build** (was by name → ~2.5M `hash_one`/parse), reused `CaptureLocations` scratch. ~17–20%.
 - **`\G` anchoring** fixed an O(n²) forward-scan pathology (124 KB Python parse 177 s → 0.24 s).
 - **Experimental zero-copy output backends:** `SpanTree` (token values borrow input `&str`, labels borrow grammar, no `Tree` node → ~41% fewer allocs, ~1.3×); `TapeTree` (flat `nodes`/`kids` arrays → O(log n) allocator calls).
@@ -240,11 +253,31 @@ Source: <https://www.sciencedirect.com/science/article/pii/S0167642315002610>
 
 **Bottom line for prioritization:** the evidence says spend effort where lark-rs's own
 profiler already points — **memory/allocation layout (the arena/Tape work) and lexer
-constant factors (a baked DFA first, SIMD later)** — because the algorithmic axis is
-exhausted. The single highest-confidence, best-fit *new* idea from the literature is
-**B1 (baked/directly-executable DFA lexer)**: it targets the largest instruction share,
-matches the existing table-interpreted DFA + codegen architecture, and needs no
-vectorization rewrite.
+constant factors (a baked DFA first, SIMD later)** — because the algorithmic axis has
+no better *bound* to offer (constant-factor challengers like GLR remain, gated on
+benchmark proof — see the TL;DR scope note). The best-fit *new* idea to **try first**
+is **B1 (baked/directly-executable DFA lexer)**: it targets the largest instruction
+share, matches the existing table-interpreted DFA + codegen architecture, and needs no
+vectorization rewrite — but it is a hypothesis to measure, not a settled win.
+
+### Suggested benchmark tasks (turn recommendations into measurements)
+
+Every lever above should be a *tracked delta*, not a belief. Concrete experiments,
+each a re-runnable harness in the `BENCH.md` discipline (deterministic counters where
+possible; wall-clock as a trend, never a gate):
+
+1. **Child-list representation — DONE.** SpanTree (per-node `Vec`) vs TapeTree (flat
+   `kids[]`) allocation isolation: `examples/child_vec_alloc.rs` (result: exactly
+   1.000 alloc/internal-node, ~96% of `parse_span`'s allocations; `BENCH.md`). Still
+   open: a **SmallVec-inline** child variant as a third point.
+2. **Baked DFA vs `regex-automata` DFA** on the real wild-bank corpus — reused-parser
+   *parse* throughput (the hot path) held separate from one-shot *build+parse* (baking
+   moves cost to build time). This is the experiment that would confirm or kill B1.
+3. **Label interning (M2)** — a `u32`-label output backend vs the owned-`String`
+   default, measured on `token_value_string_bytes`-style counters + real allocs.
+4. **Reused-parser vs one-shot** split across all backends — lark-rs's headline use is
+   a parser built once and reused; the build-cost levers (arena, baking) matter only
+   in the one-shot column, and conflating the two hides which lever helps which use.
 
 ---
 
@@ -372,9 +405,18 @@ experiment would ground the entire child-list decision better than any paper.
 
 ### Open questions (memory axis)
 
-1. **Isolated child-`Vec` cost:** benchmark SpanTree (per-node `Vec`) vs TapeTree (flat
-   `kids[]`) vs a SmallVec-inline variant on the existing corpora — the one number the
-   literature can't supply.
+1. **Isolated child-`Vec` cost — ANSWERED (2026-07-03, `examples/child_vec_alloc.rs`).**
+   Benchmarking SpanTree (per-node `Vec`) vs TapeTree (flat `kids[]`) with a counting
+   allocator — the two paths differ *only* in child-list representation, both zero-copy
+   (`tree_nodes_built == 0`) — isolates the cost to **exactly 1.000 allocation per
+   internal node**, flat across a 43× size sweep (0.997→1.000→1.000). That single
+   per-node `Vec` is **~96% of `parse_span()`'s remaining allocations** (0.165 of 0.172
+   allocs/byte); the flat `kids[]` arena (`parse_tape`) removes it, landing at **0.007
+   allocs/byte** for a ~1.76× wall-clock trend. So the per-node child `Vec` — not token
+   strings or labels — is the dominant residual span-path allocation, and the flat
+   child arena (M1/M5, the `Tape` direction #243) is the confirmed lever. A SmallVec-
+   inline variant remains unmeasured. Full write-up: `BENCH.md` §"The per-node
+   child-`Vec` cost, isolated".
 2. **Marginal stacking:** does label-interning + span-borrowed values + flat `kids[]` get
    the default owned-`Tree` path closer to the ~3-allocs/byte target than TapeTree alone,
    and where does each technique's reduction plateau?
