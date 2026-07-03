@@ -1,17 +1,32 @@
 # Spike: L5 standalone-bake epic (#620) → measurements on the standalone surface (2026-07-03)
 
-**Throwaway measurement spike.** Turns the phases of issue #620 (bake the DFA lexer
-into `generate_standalone` / `include_lark!` parsers) into before/after numbers **on
-the standalone surface**, before the epic is committed. The prior 2026-07-03 spike
-(PR #617, `spike-parser-optimizations-2026-07-03.md`) proved the levers at the
-*in-process DFA-scanner* level and **killed** the baked DFA as an in-process end-to-end
-lever (~6%). #620's thesis is that this **inverts on the one-shot/standalone path**.
-This spike tests that thesis where it lives: a *generated* parser's build+parse
+**Consolidated record of three parallel spikes (PRs #621, #622, #623).** This branch
+(#623) is the canonical base; the net-new results the siblings contributed are folded in
+and attributed inline (§"Triangulation" lists what each added). Turns the phases of issue
+#620 (bake the DFA lexer into `generate_standalone` / `include_lark!` parsers) into
+before/after numbers **on the standalone surface**, before the epic is committed. The
+prior 2026-07-03 spike (PR #617, `spike-parser-optimizations-2026-07-03.md`) proved the
+levers at the *in-process DFA-scanner* level and **killed** the baked DFA as an in-process
+end-to-end lever (~6%). #620's thesis is that this **inverts on the one-shot/standalone
+path**. This spike tests that thesis where it lives: a *generated* parser's build+parse
 economics and binary footprint.
 
 Everything here is directional and feature-gated: the harnesses are throwaway examples
 behind `baked-dfa-spike` plus one shell driver; nothing on the default build path
 changed. **Only ratios travel** (shared Linux x86_64 box, release + LTO), per BENCH.md.
+
+> **Triangulation (three independent harnesses, one answer).** #621, #622, and #623 each
+> built a separate standalone-bake harness and independently confirmed the two
+> load-bearing facts: the standalone runtime is a **`regex`-crate basic lexer** → the bake
+> multiplier is **×1** (14–235 KiB/grammar, not the ×47–108 contextual worst case #620
+> sized against), and baking **drops the `regex` dependency**, so binary size and compile
+> time *invert* from costs into gains. Net-new to each: **#623** (this note) implemented
+> the regex-free `unless` retype so the dep drops even for keyword grammars, measured the
+> full generate→compile→size loop with an oracle-digest correctness gate, and found the
+> O(n²) `tok+` bug; **#622** measured the L5d intern half with an exact allocation
+> closed-form and caught the matter_idl binary-*grows* exception (regex kept for ci
+> keywords); **#621** framed the post-bake parser as **output-bound**. Where a figure is
+> cited from a sibling rather than re-measured here, it is marked as such.
 
 ## The one fact that reprices the whole epic
 
@@ -78,11 +93,12 @@ plain scanner **DFA-flattens** (single dense engine, context-insensitive start �
   dependency-drop below. `to_bytes` keeps `regex-automata` linked and is therefore the
   wrong footprint variant for standalone.
 - **Scope is narrow.** Only 4 wild grammars (+ JSON) both bake *and* flatten, and two of
-  those (matter_idl, and pep508) turn out **not basic-lexer-parseable** (below), so the
-  perf/footprint lever's real beneficiary population on today's wild bank is *tiny*.
-  `tartiflette` flattens but the current standalone *rejects* it (a terminal the
-  `regex` runtime can't host) — a **capability** L5 could unlock by baking the DFA,
-  distinct from the perf lever.
+  those are **contextual-load-bearing**, so the basic-lexer standalone parses only part of
+  their real corpus (matter_idl **5/8** inputs; **poetry_pep508 0/14**) — see the
+  degradation-policy finding below. So the perf/footprint lever's real beneficiary
+  population on today's wild bank is *tiny*. `tartiflette` flattens but the current
+  standalone *rejects* it (a terminal the `regex` runtime can't host) — a **capability** L5
+  could unlock by baking the DFA, distinct from the perf lever.
 
 ---
 
@@ -150,7 +166,7 @@ All three are **tree-identical to the in-process basic-lexer oracle** over the f
     build (0.26–0.66 ms, one scanner)**, not the ~1.8 ms determinization × many
     contextual scanners the epic cites (standalone never pays that).
 
-**Second/third grammars confirm the size + compile inversion and the correctness of the
+**Four grammars confirm the size + compile inversion and the correctness of the
 regex-free retype:**
 
 | grammar (input) | stock stripped | baked / classed stripped | cold build stock→baked | correctness |
@@ -158,11 +174,40 @@ regex-free retype:**
 | json (594 KB)            | 1.81 MiB | 0.46 / 0.40 MiB | 18.0 → 4.4 s | ✅ = oracle |
 | kw ci-keywords (95 KB)   | 1.81 MiB | 0.41 / 0.40 MiB | 18.2 → 4.24 s | ✅ = oracle (regex-free `unless`) |
 | poetry_markers (82 B, **235-state** table) | 1.81 MiB | 0.64 / 0.45 MiB | 17.8 → 4.3 s | ✅ = oracle |
+| **matter_idl** (849 B, 57 `unless`, **47 ci**) | 1.91 MiB | **0.63 / 0.58 MiB** | — | ✅ = oracle |
 
 Even the **largest** table in the set (poetry_markers, 235 states / 235 KiB flat) yields
 a binary **3× smaller** than stock; byte-class compression brings it to **4.2×** (and
 saves 182 KiB of binary vs flat — byte-class matters most exactly where the table is
 biggest).
+
+**matter_idl resolves the one exception the siblings could not — the regex-free retype is
+this note's decisive advantage.** #622 measured matter_idl's baked binary *growing* to
+2.42 MiB (+150 KB over its 2.27 MiB stock): its bake left the **47 case-insensitive
+`unless` keywords on `Regex`** (`^(?i:kw)$` per keyword), so the whole `regex` crate stayed
+linked and the 158 KiB table was pure addition. Because #623's `Scanner::new` re-expresses
+the ci retype with **`eq_ignore_ascii_case`** (no regex), `regex` is fully dead-code
+eliminated even for this keyword-heavy grammar: **baked 0.63 MiB / classed 0.58 MiB — a
+3.0–3.3× *shrink*** (vs #622's baked 2.42 MiB, which *grew* +150 KB over its stock),
+tree-identical to the oracle over the ci-keyword-heavy input (digest gate). So the "binary grows for ci-keyword grammars" caveat #622 flagged, and the "unless
+not wired in this throwaway" caveat #621 flagged, are both **closed**: bake the ci-`unless`
+as an ASCII compare and the dependency-drop holds for *every* qualifying grammar. (The
+retype boundary: `eq_ignore_ascii_case` matches Python's `(?i:)` for ASCII keywords — all
+bundled/wild ci keywords are ASCII; a non-ASCII ci keyword would need a Unicode-fold
+compare, still regex-free. The digest gate would catch any divergence.)
+
+**Compile-time decomposition — report the win as a range with its mechanism, not a point
+estimate (folds in #622 §3 + #621).** The compile-time multiplier is entirely the removed
+`regex` dependency, and its magnitude is **config-sensitive**:
+- **Leaf rustc cost is flat.** #622 measured the parser crate alone (deps warm): all
+  variants compile in **0.82–1.13 s**, baked ≤ stock. The 68–235 KiB `static` table is
+  cheap for rustc; it does **not** add compile time.
+- **The removed dependency is the whole win, and LTO scales it.** #623's numbers use
+  `lto = true`: dropping `regex` erases its compile *and* its LTO-IR reprocessing at the
+  final link, giving **cold 18.0 → 4.4 s (4.1×)** / warm-relink 13.3 → 4.25 s. #621's
+  clean build (deps included) measured **8.9 → 0.76 s (11.7×)**. Both are real; the spread
+  (4–12×) is LTO config + what else is in the crate. **Honest read: leaf/rustc cost is
+  flat; the 4–12× is the removed `regex` crate (its build + LTO IR), not the table.**
 
 ---
 
@@ -191,23 +236,104 @@ inversion is unaffected (retype is regex-free in the bake).
 
 ---
 
-## L5d — tape/interned output in the runtime copy — **verdict: deferred (not measured)**
+## After L5b the generated parser is **output-bound** (bridge to L5d, from #621)
 
-Not attempted this spike. Rationale: (1) it is real surgery in the generated runtime's
-`run`/`assemble`/`shape` path (a second copy of output shaping to keep honest under the
-ADR-0008 mirror), (2) the in-process reference (−2 allocs/node, ~1.6×) already exists and
-per the mirror must be *re-measured*, not assumed, and (3) a more urgent runtime issue
-surfaced first (below) that any tape work must contend with. A single confirm/refute is
-still worth a follow-up, but it is lower-value than L5b and independent of it.
+Once the scanner is baked, it stops being the bottleneck. #621's Harness B decomposes the
+baked reused parse (610 KB JSON, 67.8 ms): **scanning is only ~2 ms** (the baked table at
+~300 MB/s), so the residual **~66 ms is LALR table-drive + owned-`Tree` materialization**
+(per-node `String` label + `Vec<Child>` + owned token `String`s). This mirrors the
+in-process finding exactly: after the lexer is fixed, the generated parser is
+**allocation/output-bound**, and the next lever is L5d (interned labels + tape output),
+*not* more scanner work. It is also why the standalone reused throughput is ~in-process
+`parse()` parity, not a new tier — see the scope correction below.
 
-### Incidental out-of-scope find (file separately)
+## L5d — interned / tape output — **verdict: intern half CONFIRMED (measured by #622); tape unmeasured**
 
-**The standalone runtime has an O(n²) in flat-repetition (`tok+`) tree assembly.** A
-95 KB input of `start: tok+` (20 000 repetitions) parsed in **~2.5 s** — scan-independent
-(stock ≈ baked ≈ classed), so it is the `assemble`/transparent-recurse path rebuilding
-the growing child vector per reduction (the standalone analog of the resolve-mode
-quadratic #55 fixed in-process). Orthogonal to #620; should be its own issue. (It is why
-the `kw` grammar is a size/compile/correctness data point only, not a throughput one.)
+Not re-measured on this branch (#623): adding an `interned` variant to the emit path means
+retyping `Token::type_`/`Tree::data` to `&'static str`, which ripples through the runtime's
+`Tree`/`Child`/`Display`/`ContainerSpan` — >1 h of mirror surgery and error-prone — so per
+the spike brief's escape hatch this is **reproduced-by-sibling #622, cited not
+re-measured**. What #622 measured (and this note verified against the runtime source):
+
+- **Interning is *free* on the standalone surface** — symbol names and rule tree-names are
+  already `&'static str` in the baked `DATA`, so `Token::type_`/`Tree::data` can simply
+  stop copying them (no interner, unlike in-process M2).
+- **Exact allocation closed-form: `−(tokens_incl_EOI + shifted_tokens + tree_nodes)`** —
+  json **−362 004** (132 002 + 132 001 + 98 001), matter_idl −790, poetry_markers −238,
+  at **1.10–1.23×** wall-clock. The extra `shifted_tokens` term (vs in-process M2's
+  −1/node) is **standalone-specific and verified here against `runtime.rs`**: `run` does
+  `value_stack.push(NodeValue::Token(token.clone()))`, so a shifted token's `type_`
+  `String` is allocated in `lex` *and again* on the clone onto the value stack — **two
+  allocations per shifted token**, both removed by interning.
+- The residual owned `String` per token is then `value` (M6 territory), same as in-process.
+
+**Tape (M5) is unmeasured by all three spikes.** #620 can decide L5d's intern half now (free,
+confirmed, exact); the tape half rides #619's default-`Tree` decision.
+
+### Incidental out-of-scope find — filed as its own issue
+
+**The standalone runtime has an O(n²) in flat-repetition (`tok+`) tree assembly** (filed as
+#624, `bug`; linked from #620). A 95 KB input of `start: tok+` (~20 000 repetitions) parsed in
+**~2.5 s** — scan-independent (stock ≈ baked ≈ classed), so it is the
+`assemble`/transparent-recurse path rebuilding the growing child vector per reduction (the
+standalone analog of the resolve-mode quadratic #55 fixed in-process). Orthogonal to #620,
+**not a blocker** for the epic; it is why the `kw` grammar is a size/compile/correctness
+data point only, not a throughput one, and it is the more urgent runtime issue any L5d tape
+work must contend with.
+
+---
+
+## Scope correction — the "lalrpop speed band" framing is *not* established
+
+An informal aspiration attached to this epic in conversation was that standalone baking
+"gets us into lalrpop's speed band." **The spikes did not establish that, and this note
+should not be read as if they did.**
+
+- **Baked standalone reused throughput is ~5–9 MB/s** (594 KB JSON) — roughly in-process
+  `parse()` parity (~7.5–8.5 MB/s), **not a leap into a new tier.** The bake fixed the
+  *lexer*; per the output-bound decomposition above, the parse is now LR-drive +
+  owned-`Tree`-bound.
+- **lalrpop's speed comes from two levers this spike did not touch:** (a) generated /
+  specialized LR *code* instead of an interpreted runtime `ParseTable`, and (b)
+  typed-AST / action-code output instead of the generic owned `Tree`. Reaching that tier
+  needs L5d/tape (only the intern half is measured, ~1.10–1.23×) **plus** LR-drive
+  specialization (not scoped anywhere) **plus** an actual head-to-head bench (never run).
+- **Where the standalone bake genuinely stands out is one-shot / many-small-inputs**
+  (25–27×, the erased per-invocation `Regex::new`) — a *different axis* from raw
+  throughput, and not a lalrpop comparison at all.
+
+**Honest framing:** the epic's *actual* claims — one-shot economics + the footprint/compile
+inversion — are confirmed and better-than-priced; the lalrpop-parity framing is
+aspirational, untested, and a substantially bigger program than #620.
+
+## Soft spots (the numbers less certain than the headlines)
+
+- **Large-input reused parse ratio is the least-certain figure: ~1.3–1.8×.** #622 got
+  **1.27×** on JSON where #623 and #621 got **~1.76–1.78×** — same lever, different harness
+  framing (whole-corpus vs single-doc, alloc profile). The bimodal read is the honest one:
+  the big-document win is modest and spread; the *one-shot* small-input win (25–27×) is the
+  robust one.
+- **The compile-time multiplier is config-sensitive** (leaf ~flat; 4–12× is the removed
+  `regex` dep under LTO — see the L5b decomposition). Report it as mechanism + range, never
+  a point estimate.
+
+## Scope / degradation-policy findings (feed #620's shaping)
+
+1. **Narrow beneficiary set, and a degradation-policy question (sharpened by #622).** Only
+   JSON-shaped and tiny grammars both bake *and* basic-lex on today's wild bank. Worse, a
+   grammar can generate and still be useless: **`poetry_pep508` bakes but 0/14 of its real
+   corpus parses under the basic lexer**; **matter_idl loses 3/8** the same way (both are
+   contextual-load-bearing). #620's "degrade gracefully per scanner" therefore needs a
+   *front-door* policy too: should `generate_standalone` **warn or refuse** when a grammar
+   is contextual-load-bearing, instead of silently shipping a parser that fails at runtime?
+   Today it ships the failing parser (the basic-only limitation is documented but easy to
+   miss).
+2. **Capability angle (distinct from perf).** `tartiflette` DFA-flattens but the current
+   `regex`-runtime standalone *rejects* it (a can't-host terminal); #622 lists five such
+   RC10 grammars (lark_lark, mappyfile, pylogics_ltl, vyper, tartiflette). Baking the DFA
+   would make these standalone-able **in principle** — but only with the guarded engine +
+   guard tables baked too, beyond L5b's naive scope. This is a *capability* justification,
+   separate from the throughput/footprint one #620 leads with.
 
 ---
 
@@ -218,18 +344,24 @@ the `kw` grammar is a size/compile/correctness data point only, not a throughput
 | **L5a** leaner loop | **N/A as specified** — stock is regex-crate, not a DFA; win is only reachable via L5b | raw = 13.9× rx (2× the seam), but not shippable without the bake |
 | **L5b** flat-table bake | **CONFIRMED, cost model inverted** | 1.76× large-input parse; **27× one-shot** small-input; **binary 4.1× smaller**, **compile 4.1× faster** (regex dep dropped); tree-identical to oracle |
 | **L5c** footprint | **byte-class is the default** | ~5% throughput giveback for 1.5–4.9× smaller table; **×1 multiplier, 14–105 KiB/grammar**, dependency-free |
-| **L5d** tape output | **deferred** | not measured; in-process −2 allocs/node is the unverified reference |
+| **L5d** intern / tape | **intern half CONFIRMED** (measured by #622, cited); tape unmeasured | intern is free + exact: `−(tokens+shifted_tokens+tree_nodes)` allocs (json −362 004), 1.10–1.23× |
 
 **Net.** #620's two costed risks — rodata footprint and compile time — are **not costs on
 the standalone surface; they are gains**, because baking a table lets the generated parser
 drop the `regex` engine (the ×1 basic-lexer multiplier is what makes the table small
-enough for this to hold). The value is real but **bimodal**: modest (1.76×) for one large
-document, large (up to ~27×) for the many-small-inputs CLI/embedded pattern where the
-per-invocation `Regex::new` is the cost. The **scope is the catch**: on today's wild
-bank only JSON-shaped and tiny grammars both bake and basic-lex, so the perf lever's
-audience is narrow unless L5 also pursues the **lookaround-capability** unlock (baking
-the DFA to accept grammars the `regex` runtime currently rejects — e.g. `tartiflette`),
-which is a *different* justification than the throughput/footprint one #620 leads with.
+enough for this to hold; #623's regex-free `unless` retype makes it hold even for
+ci-keyword grammars, where #622's baked binary otherwise *grew*). The value is real but
+**bimodal**: modest and spread (**~1.3–1.8×**) for one large document, large (up to ~27×)
+for the many-small-inputs CLI/embedded pattern where the per-invocation `Regex::new` is the
+cost. **Two catches for the decision:** (1) the "lalrpop speed band" framing is *not*
+established — baked reused throughput is in-process parity, and reaching lalrpop's tier
+needs LR-specialization + typed-AST output this spike did not scope (see the scope
+correction); (2) the beneficiary set is narrow — only JSON-shaped and tiny grammars both
+bake and basic-lex, and some grammars (poetry_pep508, matter_idl) generate but fail at
+runtime under the basic lexer, so `generate_standalone` may need a warn/refuse for
+contextual-load-bearing grammars. The **lookaround-capability** unlock (baking the DFA to
+accept grammars the `regex` runtime rejects — e.g. `tartiflette`) is a *different*
+justification than the throughput/footprint one #620 leads with.
 
 Suggested re-pricing: split L5b into **(a)** the flat/byte-class bake behind the existing
 `generate_standalone` (small, differential + oracle-digest gated, net-negative
