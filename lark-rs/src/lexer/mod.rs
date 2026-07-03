@@ -320,6 +320,33 @@ impl BasicLexer {
     }
 }
 
+// SPIKE-ONLY (`baked-dfa-spike`, THROWAWAY — parser-optimization spike 2026-07-03):
+// surface the DfaScanner spike accessors on the public lexer so the baked-DFA
+// examples can reach them. Delete with the spike.
+#[cfg(feature = "baked-dfa-spike")]
+impl BasicLexer {
+    /// The plain engine's dense DFA + `PatternID → terminal id` map when this
+    /// lexer is backed by *purely* that one dense engine (see
+    /// `DfaScanner::spike_plain_dense`); `None` otherwise.
+    #[allow(clippy::type_complexity)]
+    pub fn spike_plain_dense(
+        &self,
+    ) -> Option<(&regex_automata::dfa::dense::DFA<Vec<u32>>, Vec<SymbolId>)> {
+        match &self.scanner {
+            ScannerBackend::Dfa(s) => s.spike_plain_dense(),
+            ScannerBackend::Regex(_) => None,
+        }
+    }
+
+    /// The `unless` retype the seam applies to a winning `(id, value)`.
+    pub fn spike_retype(&self, id: SymbolId, value: &str) -> SymbolId {
+        match &self.scanner {
+            ScannerBackend::Dfa(s) => s.spike_retype(id, value),
+            ScannerBackend::Regex(_) => id,
+        }
+    }
+}
+
 /// A running source cursor (byte offset + **character** offset + 1-based
 /// line/column), advanced one matched span or one skipped character at a time.
 /// Used by [`BasicLexer::lex`] so the newline-aware position bookkeeping lives in

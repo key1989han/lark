@@ -62,6 +62,12 @@ tape-tree = []
 # `lexer::tests::global_verbose_flag_refuses_lookaround_lowering`, which runs under
 # both builds).
 fancy-oracle = ["dep:fancy-regex"]
+# THROWAWAY SPIKE (parser-optimization spike 2026-07-03, docs/notes/): exposes the
+# DfaScanner's plain dense DFA + retype seam so `examples/baked_dfa_lex.rs` /
+# `examples/bake_dfa_gen.rs` can extract and drive a baked (flat-table / generated
+# goto-switch) copy of the same automaton. Not a public commitment; never enabled
+# by default; delete with the spike.
+baked-dfa-spike = []
 
 [dependencies]
 regex = "1.10"
@@ -97,6 +103,9 @@ unicode-ident = "1"
 [dev-dependencies]
 pretty_assertions = "1"
 serde_json = "1"
+# The owned-tree layout spike (`examples/owned_tree_layout_alloc.rs`) measures a
+# SmallVec-inline child-list variant as one of its data points.
+smallvec = "1"
 # The standalone-parser round-trip test (`tests/test_standalone.rs`) `include!`s a
 # generated parser, which depends only on `regex` — so the test crate needs it too.
 regex = "1.10"
@@ -113,6 +122,19 @@ regex-automata = "0.4"
 [[example]]
 name = "json_parser"
 path = "examples/json_parser.rs"
+
+# THROWAWAY SPIKE examples (parser-optimization spike 2026-07-03). They need the
+# spike-only accessors behind `baked-dfa-spike`; without the feature cargo skips
+# the targets. `bake_dfa_gen` regenerates `examples/baked/json_dfa.rs`.
+[[example]]
+name = "baked_dfa_lex"
+path = "examples/baked_dfa_lex.rs"
+required-features = ["baked-dfa-spike"]
+
+[[example]]
+name = "bake_dfa_gen"
+path = "examples/bake_dfa_gen.rs"
+required-features = ["baked-dfa-spike"]
 
 # The L0 whole-lexer differential needs the fancy-oracle reference backend (the
 # `Regex` backend's historical fancy side-probes) — meaningless against the lowered
