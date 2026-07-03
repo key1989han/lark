@@ -1,6 +1,6 @@
 # ADR-0042: intern `Tree.data` / `Token.type_` labels behind `&str` accessors (`Arc<str>` storage)
 
-- **Status:** Proposed (pending architect ratification by merge)
+- **Status:** Accepted — ratified by the architect's merge of PR #611 (2026-07-03)
 - **Date:** 2026-07-03
 
 ## Context

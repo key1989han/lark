@@ -1,6 +1,6 @@
 # ADR-0043: bindings `OutputMode` — commit the extension mechanism, `Tree`-only for now
 
-- **Status:** Proposed (pending architect ratification by merge)
+- **Status:** Accepted — ratified by the architect's merge of PR #611 (2026-07-03)
 - **Date:** 2026-07-03
 
 Extends **ADR-0029** (public `OutputBuilder` API shape), which fixed the *Rust*
