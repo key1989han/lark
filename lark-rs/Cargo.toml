@@ -136,6 +136,21 @@ name = "bake_dfa_gen"
 path = "examples/bake_dfa_gen.rs"
 required-features = ["baked-dfa-spike"]
 
+# THROWAWAY SPIKE examples (standalone-bake spike 2026-07-03, #620). Measure the
+# bake lever on the generated-parser surface; same spike-only accessors.
+# `standalone_bake_spike` = in-process scanner isolation; `gen_baked_parser` = emit
+# a stock + baked JSON parser crate for the compile-time/binary-size axis. See
+# docs/notes/spike-standalone-bake-2026-07-03.md.
+[[example]]
+name = "standalone_bake_spike"
+path = "examples/standalone_bake_spike.rs"
+required-features = ["baked-dfa-spike"]
+
+[[example]]
+name = "gen_baked_parser"
+path = "examples/gen_baked_parser.rs"
+required-features = ["baked-dfa-spike"]
+
 # The L0 whole-lexer differential needs the fancy-oracle reference backend (the
 # `Regex` backend's historical fancy side-probes) — meaningless against the lowered
 # probes, which share the machinery under test. CI and check.sh run it BY NAME
