@@ -144,7 +144,7 @@ hierarchy (`GrammarError` at build time, `ParseError` at parse time).
 | Area | Where | Note |
 |---|---|---|
 | Significant whitespace | `postlex.rs` | the `Indenter` (INDENT/DEDENT injection) |
-| Tree → text serialization | `reconstruct.rs` | `Reconstructor`: matches a shaped tree back onto the grammar and re-emits source (discarded-literal write-back, `term_subs`). Grounded metamorphically — `parse(reconstruct(parse(x))) == parse(x)` over the LALR bank — not by a Python byte oracle ([ADR-0040](docs/decisions/0040-reconstructor-metamorphic-grounding.md)) |
+| Tree → text serialization | `reconstruct.rs` | `Reconstructor`: matches a shaped tree back onto the grammar and re-emits source (discarded-literal write-back, `term_subs`). Grounded metamorphically — `parse(reconstruct(parse(x))) == parse(x)` over the LALR bank — not by a Python byte oracle ([ADR-0044](docs/decisions/0044-reconstructor-metamorphic-grounding.md)) |
 | Standalone codegen | `standalone/` | the one `ParseTable → Rust` emitter (`generate`/`generate_standalone`); two front-ends bake through it — the `generate-parser` CLI (to a file) and `include_lark!` (inline, #85) |
 | Perf instrumentation | `perf.rs` | deterministic work counters ([ADR-0007](docs/decisions/0007-deterministic-perf-counters.md)) |
 | Distribution bindings | `python/`, `wasm/`, `lark_h/`, `lark_proc/` | PyO3, WASM, C API, proc-macro (separate crates) |

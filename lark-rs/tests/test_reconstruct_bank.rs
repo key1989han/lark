@@ -1,4 +1,4 @@
-//! Whole-bank metamorphic sweep for the reconstructor (ADR-0040).
+//! Whole-bank metamorphic sweep for the reconstructor (ADR-0044).
 //!
 //! Replays every *accepted* case of the LALR compliance bank
 //! (`tests/fixtures/oracles/compliance/bank.json`) through the round-trip

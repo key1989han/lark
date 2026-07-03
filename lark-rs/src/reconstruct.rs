@@ -18,7 +18,7 @@
 //! reconstruction output is grounded by the *metamorphic* round-trip property
 //! instead (`parse(reconstruct(parse(x)))` must equal `parse(x)` structurally),
 //! enforced by `tests/test_reconstruct.rs` over curated grammars and the whole
-//! LALR compliance bank. See ADR-0040.
+//! LALR compliance bank. See ADR-0044.
 //!
 //! Guarantees and limits:
 //!
@@ -36,7 +36,7 @@
 //!   (`"1" "." "5"` → `1.5` when `NUMBER` allows decimals), grammars whose
 //!   only `%ignore` is regex trivia (comments) so no separator exists, and a
 //!   canonical-variant choice among tree-indistinguishable alternatives that
-//!   a priority-tuned sibling rule can capture on re-parse (see ADR-0040).
+//!   a priority-tuned sibling rule can capture on re-parse (see ADR-0044).
 //! - A **discarded** terminal (filtered from the tree) can only be re-emitted
 //!   when its pattern is a fixed string. A discarded regex or `%declare`d
 //!   terminal needs a substitution via [`Reconstructor::with_term_subs`],
