@@ -25,6 +25,13 @@ Four things live here:
         python3 tools/fuzz_differential.py --fuzz-grammars --seed 7 -n 200 \
             --gg-finds-out /tmp/grammar_finds.json
 
+     `--gg-seed-range A:B` sweeps every seed in [A, B] in one process. That is
+     the *regression* tier of this mode: `scripts/fuzz-seed-range.sh` pins the
+     committed once-verified-clean range (epic #208), so a RED there is a
+     regression to fix, not a discovery find to triage. Each seed's batch is
+     byte-identical to a standalone `--seed` run, so any find replays from its
+     single seed.
+
   1. Discovery (default) — generate grammar-directed + mutated inputs for the
      trusted grammars and validate them against Python Lark (the oracle). This
      reports stats only; the actual lark-rs-vs-oracle diff happens in Rust. To
@@ -81,6 +88,7 @@ Usage:
 import argparse
 import json
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -510,6 +518,67 @@ def generate_batch(grammars, count, seed, depth, do_mutate):
     return batch
 
 
+def _fuzz_grammars_one_seed(seed, args, differ_bin, scratch_dir):
+    """One deterministic --fuzz-grammars batch for `seed`. A fresh RNG per seed
+    keeps every seed's batch byte-identical whether it runs standalone
+    (`--seed S`) or as one slice of a `--gg-seed-range` sweep — a range find
+    always replays from its single seed."""
+    rng = random.Random(seed)
+
+    n_generated = 0
+    n_built = 0
+    n_inputs = 0
+    finds = []  # (grammar_text, grammar_file, input, seed) tuples that diverged
+
+    for gi in range(args.count):
+        n_rules = rng.randint(1, args.gg_rules)
+        grammar_text = generate_grammar(rng, n_rules)
+        n_generated += 1
+
+        # Step 2: Python Lark is the oracle — skip any grammar IT rejects.
+        try:
+            parser = Lark(grammar_text, parser="lalr", lexer="contextual",
+                          start="start", maybe_placeholders=False)
+        except LarkError:
+            continue
+        except Exception:
+            # Non-LarkError build failures (e.g. an unsupported template shape) are
+            # also "the oracle won't build it" — skip, don't crash the batch.
+            continue
+        n_built += 1
+
+        # Write the exact built text to a scratch file for the differ.
+        grammar_file = scratch_dir / f"gg_{seed}_{gi}.lark"
+        grammar_file.write_text(grammar_text)
+        grammar_file_str = str(grammar_file)
+
+        # Step 3: generate inputs and diff lark-rs against the oracle.
+        for _ in range(args.gg_inputs):
+            inp = generate_grammar_input(rng, parser)
+            n_inputs += 1
+            try:
+                # Pass the scratch path as the grammar *label* too, so a differ
+                # RuntimeError names the exact .lark file (reproducibility), not an
+                # opaque '<random>'.
+                if diverges(parser, differ_bin, grammar_file_str, inp,
+                            grammar_file=grammar_file_str):
+                    finds.append((grammar_text, grammar_file_str, inp, seed))
+                    break  # one find per grammar is plenty to triage
+            except RuntimeError as e:
+                # A differ invocation failure is a real, reportable problem (e.g. a
+                # grammar lark-rs cannot build that Python can) — surface it as a
+                # find so it is not silently lost.
+                print(f"differ error on grammar {grammar_file_str} input {inp!r}: {e}",
+                      file=sys.stderr)
+                finds.append((grammar_text, grammar_file_str, inp, seed))
+                break
+
+    print(f"fuzz-grammars (seed={seed}): generated {n_generated}, "
+          f"{n_built} built in Python Lark, {n_inputs} inputs diffed, "
+          f"{len(finds)} grammar(s) diverged")
+    return n_generated, n_built, n_inputs, finds
+
+
 def fuzz_grammars(args, ap):
     """`--fuzz-grammars` mode: generate random grammars, validate each against the
     Python-Lark oracle (skip rejects), generate inputs, diff lark-rs against the
@@ -519,10 +588,10 @@ def fuzz_grammars(args, ap):
     This is the grammar-level counterpart to input fuzzing: it surfaces
     template-expansion, EBNF-operator, nullable-edge and priority bugs a fixed
     grammar cannot. Deterministic given --seed: a nightly find replays from the
-    seed in its log.
+    seed in its log. With --gg-seed-range A:B it sweeps every seed in [A, B]
+    in one process — the *regression* tier over a committed, once-verified-clean
+    range (epic #208), as opposed to the fresh-entropy discovery tier.
     """
-    rng = random.Random(args.seed)
-
     # --fuzz-grammars has no legacy fallback: the only way to diff lark-rs against
     # the oracle for a random grammar is the online differ, so --no-differ is
     # meaningless here. Reject it up front rather than crashing mid-batch when the
@@ -530,6 +599,17 @@ def fuzz_grammars(args, ap):
     if args.no_differ:
         ap.error("--fuzz-grammars requires the differ binary; --no-differ is not "
                  "supported (there is no legacy fallback for a random grammar)")
+
+    if args.gg_seed_range:
+        m = re.fullmatch(r"(\d+):(\d+)", args.gg_seed_range)
+        if not m:
+            ap.error("--gg-seed-range must be START:END (e.g. 1:300)")
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if lo > hi:
+            ap.error("--gg-seed-range START must be <= END")
+        seeds = range(lo, hi + 1)
+    else:
+        seeds = [args.seed]
 
     differ_bin = find_differ_binary(args.differ_bin)
     if differ_bin is None:
@@ -552,54 +632,18 @@ def fuzz_grammars(args, ap):
     n_generated = 0
     n_built = 0
     n_inputs = 0
-    finds = []  # (grammar_text, grammar_file, input) tuples that diverged
+    finds = []
+    for seed in seeds:
+        g, b, i, f = _fuzz_grammars_one_seed(seed, args, differ_bin, scratch_dir)
+        n_generated += g
+        n_built += b
+        n_inputs += i
+        finds.extend(f)
 
-    for gi in range(args.count):
-        n_rules = rng.randint(1, args.gg_rules)
-        grammar_text = generate_grammar(rng, n_rules)
-        n_generated += 1
-
-        # Step 2: Python Lark is the oracle — skip any grammar IT rejects.
-        try:
-            parser = Lark(grammar_text, parser="lalr", lexer="contextual",
-                          start="start", maybe_placeholders=False)
-        except LarkError:
-            continue
-        except Exception:
-            # Non-LarkError build failures (e.g. an unsupported template shape) are
-            # also "the oracle won't build it" — skip, don't crash the batch.
-            continue
-        n_built += 1
-
-        # Write the exact built text to a scratch file for the differ.
-        grammar_file = scratch_dir / f"gg_{args.seed}_{gi}.lark"
-        grammar_file.write_text(grammar_text)
-        grammar_file_str = str(grammar_file)
-
-        # Step 3: generate inputs and diff lark-rs against the oracle.
-        for _ in range(args.gg_inputs):
-            inp = generate_grammar_input(rng, parser)
-            n_inputs += 1
-            try:
-                # Pass the scratch path as the grammar *label* too, so a differ
-                # RuntimeError names the exact .lark file (reproducibility), not an
-                # opaque '<random>'.
-                if diverges(parser, differ_bin, grammar_file_str, inp,
-                            grammar_file=grammar_file_str):
-                    finds.append((grammar_text, grammar_file_str, inp))
-                    break  # one find per grammar is plenty to triage
-            except RuntimeError as e:
-                # A differ invocation failure is a real, reportable problem (e.g. a
-                # grammar lark-rs cannot build that Python can) — surface it as a
-                # find so it is not silently lost.
-                print(f"differ error on grammar {grammar_file_str} input {inp!r}: {e}",
-                      file=sys.stderr)
-                finds.append((grammar_text, grammar_file_str, inp))
-                break
-
-    print(f"fuzz-grammars (seed={args.seed}): generated {n_generated}, "
-          f"{n_built} built in Python Lark, {n_inputs} inputs diffed, "
-          f"{len(finds)} grammar(s) diverged")
+    if len(seeds) > 1:
+        print(f"fuzz-grammars seed-range {seeds[0]}..{seeds[-1]}: "
+              f"generated {n_generated}, {n_built} built in Python Lark, "
+              f"{n_inputs} inputs diffed, {len(finds)} grammar(s) diverged")
 
     if not finds:
         print("(no divergence — clean run)")
@@ -611,7 +655,7 @@ def fuzz_grammars(args, ap):
     # input and the grammar so a maintainer can triage and `--record` it.
     print(f"\n{len(finds)} divergence(s) found — minimized repros:")
     reports = []
-    for grammar_text, grammar_file_str, inp in finds:
+    for grammar_text, grammar_file_str, inp, seed in finds:
         parser = Lark(grammar_text, parser="lalr", lexer="contextual",
                       start="start", maybe_placeholders=False)
 
@@ -628,7 +672,14 @@ def fuzz_grammars(args, ap):
                 return False
 
         small = minimize(parser, inp, diverge_pred)
+        # A seed only replays under the SAME batch parameters, so the report
+        # carries the full recipe — a find is self-contained, not dependent on
+        # a comment somewhere staying in sync with the invocation.
         report = {
+            "seed": seed,
+            "count": args.count,
+            "gg_rules": args.gg_rules,
+            "gg_inputs": args.gg_inputs,
             "grammar": grammar_text,
             "grammar_file": grammar_file_str,
             "input": inp,
@@ -690,6 +741,13 @@ def main():
                          "(--fuzz-grammars); each grammar gets 1..N")
     ap.add_argument("--gg-inputs", type=int, default=20, metavar="N",
                     help="random inputs to diff per built grammar (--fuzz-grammars)")
+    ap.add_argument("--gg-seed-range", metavar="A:B",
+                    help="sweep --fuzz-grammars over every seed in [A, B] "
+                         "(inclusive) in one process, overriding --seed; each "
+                         "seed's batch is byte-identical to a standalone --seed "
+                         "run. This is the committed-range REGRESSION tier "
+                         "(scripts/fuzz-seed-range.sh, epic #208) — a divergence "
+                         "here is a regression, not a discovery find")
     ap.add_argument("--gg-scratch-dir", metavar="DIR",
                     help="where to write the random `.lark` files the differ reads "
                          "(default: target/fuzz_grammars; never committed)")
@@ -697,6 +755,13 @@ def main():
                     help="write the minimized grammar-fuzz finds to FILE as JSON "
                          "(for the nightly artifact upload)")
     args = ap.parse_args()
+
+    # A --gg-* flag without --fuzz-grammars must be LOUD, not a silent no-op:
+    # `--gg-seed-range 1:300` alone would otherwise run the unrelated
+    # input-discovery mode and exit 0 — a vacuous green for what the caller
+    # believed was the committed regression sweep.
+    if args.gg_seed_range and not args.fuzz_grammars:
+        ap.error("--gg-seed-range requires --fuzz-grammars")
 
     # ── Random grammar fuzzing (its own self-contained discovery loop) ───────
     if args.fuzz_grammars:

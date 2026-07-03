@@ -1,12 +1,19 @@
-name: lark-rs differential fuzz (nightly discovery)
+name: lark-rs differential fuzz (nightly)
 
-# Out-of-band *discovery* tier of the differential fuzzer — never on the PR
-# critical path. It generates a large batch of inputs with fresh entropy, freezes
-# Python Lark's verdict for each (into a throwaway scratch corpus, not the
-# committed one), and replays lark-rs against it. A RED here is a new find: the
-# batch is uploaded as an artifact so it can be minimized (`--minimize`) and kept
-# (`--record`) as a permanent regression case. Nothing is ever committed by this
-# job.
+# Out-of-band tiers of the differential fuzzer — never on the PR critical path.
+#
+# `discover` is the *discovery* tier: it generates a large batch of inputs with
+# fresh entropy, freezes Python Lark's verdict for each (into a throwaway scratch
+# corpus, not the committed one), and replays lark-rs against it. A RED here is a
+# new find: the batch is uploaded as an artifact so it can be minimized
+# (`--minimize`) and kept (`--record`) as a permanent regression case. Nothing is
+# ever committed by this job.
+#
+# `seed-range-regression` is the *regression* tier (epic #208): it replays the
+# committed grammar-fuzz seed range (`scripts/fuzz-seed-range.sh`), which was
+# once verified clean. Unlike the discovery tiers, it GATES — a RED means a
+# once-clean seed diverged again, i.e. a regression, per the "never regress a
+# green corpus" invariant.
 
 on:
   schedule:
@@ -110,3 +117,60 @@ jobs:
           path: |
             ${{ runner.temp }}/grammar_finds.json
             ${{ runner.temp }}/grammar_fuzz.log
+
+  # The committed-range regression tier (epic #208, ADR-0041). Deterministic —
+  # no fresh entropy — and GATING: this range ran clean when it was committed,
+  # so any divergence is a regression. A find's JSON carries its full replay
+  # recipe (seed + count/gg_rules/gg_inputs); replay a single seed with
+  # `LARK_FUZZ_SEED_RANGE=<seed>:<seed> scripts/fuzz-seed-range.sh`.
+  # Skipped on a workflow_dispatch that pins a seed — that dispatch is a
+  # discovery-find replay, and re-sweeping the whole committed range there is
+  # noise for it.
+  seed-range-regression:
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.seed == ''
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lark-rs
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Build the differ ourselves, in release: find_differ_binary prefers
+      # target/release/differ when it exists, and its own fallback is an
+      # unoptimized debug build — a needless slowdown across a ~57k-input sweep.
+      - name: Build the differ (release)
+        run: cargo build --release --bin differ
+
+      - name: Replay the committed grammar-fuzz seed range
+        run: |
+          # Actions' default run shell has -e but NOT pipefail — without this,
+          # `| tee` would swallow the sweep's exit 1 and green a real find.
+          set -o pipefail
+          scripts/fuzz-seed-range.sh \
+            --gg-finds-out "$RUNNER_TEMP/seed_range_finds.json" \
+            | tee "$RUNNER_TEMP/seed_range.log"
+
+      # The log rides along so a red run that dies before the finds JSON is
+      # written (timeout, crash mid-sweep) still leaves the per-seed trail —
+      # including any `differ error` lines, which mark infra failures rather
+      # than true tree divergences.
+      - name: Upload seed-range regression finds
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seed-range-regression-find-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/seed_range_finds.json
+            ${{ runner.temp }}/seed_range.log
