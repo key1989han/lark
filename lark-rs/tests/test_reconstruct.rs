@@ -2,7 +2,7 @@
 //!
 //! Reconstruction has no Python-Lark byte oracle (Python's own `Reconstructor`
 //! is experimental and its output text is not canonical), so it is grounded by
-//! the **metamorphic round-trip property** instead (ADR-0040):
+//! the **metamorphic round-trip property** instead (ADR-0044):
 //!
 //! > for any grammar G and input x accepted by G,
 //! > `parse(reconstruct(parse(x)))` is structurally equal to `parse(x)`.

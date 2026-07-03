@@ -1,4 +1,4 @@
-# ADR-0040: The reconstructor is grounded metamorphically, not by the Python oracle
+# ADR-0044: The reconstructor is grounded metamorphically, not by the Python oracle
 
 - **Status:** Proposed (pending architect ratification)
 - **Date:** 2026-07-01
