@@ -136,6 +136,20 @@ name = "bake_dfa_gen"
 path = "examples/bake_dfa_gen.rs"
 required-features = ["baked-dfa-spike"]
 
+# THROWAWAY SPIKE examples (standalone-bake spike 2026-07-03, issue #620).
+# `standalone_bake_gen` regenerates `examples/standalone_spike/gen/*.rs` (spliced
+# variant copies of `generate_standalone` output); `standalone_bake_bench` gates
+# them (token-stream + oracle-tree differentials) and prints the measurements.
+[[example]]
+name = "standalone_bake_gen"
+path = "examples/standalone_bake_gen.rs"
+required-features = ["baked-dfa-spike"]
+
+[[example]]
+name = "standalone_bake_bench"
+path = "examples/standalone_bake_bench.rs"
+required-features = ["baked-dfa-spike"]
+
 # The L0 whole-lexer differential needs the fancy-oracle reference backend (the
 # `Regex` backend's historical fancy side-probes) — meaningless against the lowered
 # probes, which share the machinery under test. CI and check.sh run it BY NAME
