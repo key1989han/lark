@@ -1,6 +1,6 @@
 # ADR-0041: A committed seed range is the grammar fuzzer's regression tier
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted — ratified by the architect's merge of PR #610 (2026-07-03)
 - **Date:** 2026-07-02
 
 ## Context
