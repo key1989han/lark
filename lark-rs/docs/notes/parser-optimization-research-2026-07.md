@@ -26,8 +26,9 @@ The concrete levers, ranked by fit to the measured bottleneck:
    rewrite, not a tune of the current DFA.
 3. **Memory layout** (arena/flat trees, red-green, SoA) — the measured #1 bottleneck
    (~3 allocs/byte), and already lark-rs's own deferred roadmap (SpanTree/TapeTree/
-   arena). *The web pass produced no verified claims here* — flagged as the biggest
-   research gap, see §Gaps.
+   arena). Covered in depth by the **second pass, Part 3** below (label interning,
+   flat `kids[]`, arena nodes, `u32` positions; red-green trees are a deliberate
+   *non*-recommendation for a batch parser).
 4. **LR table encoding** (comb-vector/row-displacement) — real but modest; table
    lookup is not the profiled bottleneck.
 5. **Incremental & data-parallel parsing** — longer-horizon, workload-restricted
@@ -244,3 +245,141 @@ exhausted. The single highest-confidence, best-fit *new* idea from the literatur
 **B1 (baked/directly-executable DFA lexer)**: it targets the largest instruction share,
 matches the existing table-interpreted DFA + codegen architecture, and needs no
 vectorization rewrite.
+
+---
+
+## Part 3 — Second pass: memory-layout / allocation techniques (RQ5, focused)
+
+*A follow-up deep-research pass pinned entirely to the allocation axis the first pass
+under-covered. 5 angles → 21 sources fetched → 95 claims → 25 verified, 24 confirmed /
+1 refuted. This is the axis lark-rs's own profiler names as #1 (~3 allocs/byte, ~32% of
+instructions in reduce/tree-building), so it directly informs the deferred arena/Tape
+roadmap.*
+
+### The three composable, orthogonal wins
+
+The literature converges on three techniques that attack the three measured costs —
+owned `String` labels, owned `Token` value `String`s, and the per-node child `Vec`.
+
+**M1 — Flatten the tree into contiguous arrays + `u32` handles (the strongest
+evidence).** *(verified 3-0, high)* Adrian Sampson (Cornell), *Flattening ASTs*: pack
+nodes into one `Vec<Expr>`, reference children by `u32` index (`ExprRef`) not heap
+pointer. Measured **2.4× speedup** (3.1 s → 1.3 s, 100M nodes); **~38% of the pointer
+version's runtime was pure deallocation** eliminated by freeing the whole pool once;
+**even excluding deallocation the flat version was 1.5× faster** (cache/locality).
+**This is exactly lark-rs's `TapeTree` model** — the best-supported direction for a
+*batch* parser. Caveat: the workload is a tree-walking interpreter over a synthetic
+AST, not a parser building from real input, so it transfers by analogy (both are
+allocation/locality-dominated), not like-for-like.
+Source: <https://www.cs.cornell.edu/~asampson/blog/flattening.html>
+
+**M2 — Intern the small fixed set of LABELS to `Copy` `u32`.** *(verified 3-0, high)*
+rustc's `Symbol` and the `lasso` crate: a `DroplessArena` for the bytes + a content→index
+hashtable + a `Vec` for reverse lookup; a novel string is copied once (Vacant), a repeat
+returns the existing index (Occupied). All operations (equality, hashing, ordering) become
+integer ops. **Fit: near-free for lark-rs** — the rule/terminal label set is tiny and
+fixed (SpanTree already borrows them as `&str`); interning them to `u32` shrinks the node
+label to 4 bytes and dedups by construction. Interning *token values* helps only when the
+input repeats tokens heavily (JSON keys) and competes with span-borrowing (see M3).
+Sources: <https://github.com/rust-lang/rust/blob/main/compiler/rustc_span/src/symbol.rs> ·
+<https://github.com/Kixiron/lasso>
+
+**M3 — Bump/arena-allocate node storage.** *(verified 3-0, high)* Oxc reported **~20%
+overall** from moving its AST to a `bumpalo` arena (linear memory access + fast whole-arena
+drop; profiling had shown sequential per-node `Box`/`Vec` drops). `bumpalo`: allocation is a
+capacity check + pointer bump; **whole-arena free is O(1) but per-node `Drop` is not run**
+(opt-in `bumpalo::boxed::Box` runs `Drop`). **Fit: the "arena-allocated nodes" deferred
+item** — acceptable for lark-rs's non-`Drop`-heavy nodes, at a lifetime/borrow-plumbing
+cost. Note: arena-of-nodes *still leaves the per-node child `Vec`* unless combined with a
+flat `kids[]` arena (M5). Caveat: the 20% is a self-reported single-workload (JS compiler)
+figure with no reproducible harness.
+Sources: <https://oxc.rs/docs/learn/performance> · <https://github.com/fitzgen/bumpalo>
+
+### Supporting findings
+
+**M4 — `usize` → `u32` positions.** *(verified 3-0, high)* Oxc: **up to 5%** on large
+files from shrinking the hot per-node `Span` 8→4 bytes ("larger than `u32` is a 4GB
+file"). **Directly validates lark-rs's planned `u32` value-stack positions (ADR-0040).**
+Source: <https://oxc.rs/docs/learn/performance>
+
+**M5 — Child-list: a shared flat `kids[]` index arena beats a per-node `Vec`.**
+*(verified, medium — directional, no isolated benchmark)* No surveyed source isolates the
+per-node child-`Vec` cost, but the flattening (M1) and tape (M6) models all replace
+per-node child pointers/`Vec`s with an **index range into one contiguous array** — exactly
+`TapeTree`'s `kids[]`. `SmallVec`/inline-small-child and cross-node `Vec` pooling are named
+in lark-rs's own deferred list but have no external tree-builder benchmark here. **This is
+the biggest quantification gap → wants a lark-rs microbenchmark** (see Open Questions).
+Sources: (derived from) <https://www.cs.cornell.edu/~asampson/blog/flattening.html> ·
+<https://simdjson.org/api/0.4.0/md_doc_tape.html>
+
+**M6 — Token VALUES: span-borrow (best) or SSO fallback.** *(verified 3-0, high)*
+`servo/tendril` stores strings ≤8 bytes **inline, no heap allocation**, and is 16 bytes vs
+`String`'s 24 on 64-bit. **Fit: SpanTree's span-borrowing already dominates** for a batch
+parser that owns the input; SSO/`Box<str>` is the fallback for tokens that *must* be owned
+(normalized/transformed values) and shrinks the `Token` element. (Single-source figures;
+the general SSO principle is well established.)
+Source: <https://github.com/servo/tendril>
+
+**M7 — The extreme endpoint: simdjson tape + On-Demand.** *(verified 3-0, high)* The DOM
+**tape** is one flat array of 64-bit values in document order (8-bit type + 56-bit payload);
+arrays/objects store a **skip pointer** for O(1) subtree skipping. The **On-Demand** parser
+(peer-reviewed, Keiser & Lemire, SPE 2024) **builds no tree at all** — materializes only
+touched values. **Fit: validates the `TapeTree` direction**, and the 64-bit-packed
+skip-pointer layout is a concrete *upgrade path* for `TapeTree`'s `nodes[]`/`kids[]`. On-Demand
+itself is forward-only/single-pass and not transplantable to a general tree-producing parser
+— the transferable idea is *eliding untouched-node materialization*, not the full model.
+Sources: <https://simdjson.org/api/0.4.0/md_doc_tape.html> ·
+<https://onlinelibrary.wiley.com/doi/10.1002/spe.3313>
+
+### Red-green trees: a deliberate *non*-recommendation
+
+**M8 — Roslyn/rowan red-green trees are for *incremental editing*, not batch parsing.**
+*(verified 3-0, high; one sub-claim 2-1)* The green tree is immutable, parent-pointer-free,
+width-not-position (enables structural sharing + **O(log n) incremental re-parse**); the red
+tree is a lazy facade discarded on every edit. **But those are editing properties.** For a
+batch parser, structural sharing is dead weight paid at construction time: rust-analyzer's
+own maintainer measured a non-sharing contiguous representation (`syntree`) building trees
+**~2× faster than rowan** and plans to move toward a more contiguous layout for faster
+workspace load. **Conclusion: for lark-rs's batch use case, a flat tape (TapeTree) is
+preferable to interned green nodes.** (The 2× is an informal, self-flagged-unfair maintainer
+benchmark — directional.) Red-green becomes relevant only if lark-rs ever pursues the
+incremental-parsing lever from Part 2 §D1.
+Sources: <https://ericlippert.com/2012/06/08/red-green-trees/> ·
+<https://github.com/rust-lang/rust-analyzer/issues/17491>
+
+*Refuted (1-2):* the claim that simdjson DOM and On-Demand both first build a shared
+32-bit-per-structural-char index usable alone for navigation — excluded as overstated.
+
+### What this means for lark-rs (memory axis)
+
+The three prototypes lark-rs already has are the *right* structures; the literature says
+**push them further and combine them**, in this order of confidence/leverage:
+
+1. **Label interning to `u32` (M2)** — near-free, low-risk, shrinks every node label,
+   composes with everything. Do first.
+2. **Flat `kids[]` child arena (M1+M5)** — kills the per-node child `Vec`, the one
+   allocation SpanTree still pays. This is the `TapeTree` direction; the evidence for
+   flattening is the strongest in the whole pass.
+3. **Arena node storage + `u32` positions (M3+M4)** — the deferred arena work and ADR-0040,
+   each with modest but real single-digit-to-20% external validation.
+4. **SSO/`Box<str>` (M6)** only for tokens that must be owned; otherwise span-borrow.
+
+**Sharpest remaining unknown (M5):** no external source quantifies the per-node child-`Vec`
+cost in isolation. lark-rs is uniquely positioned to answer this itself — it already has
+`SpanTree` (still one child `Vec`/node) and `TapeTree` (flat `kids[]`) as A/B prototypes, so
+a `perf-counters` microbenchmark diffing the two *is* the missing measurement. That
+experiment would ground the entire child-list decision better than any paper.
+
+### Open questions (memory axis)
+
+1. **Isolated child-`Vec` cost:** benchmark SpanTree (per-node `Vec`) vs TapeTree (flat
+   `kids[]`) vs a SmallVec-inline variant on the existing corpora — the one number the
+   literature can't supply.
+2. **Marginal stacking:** does label-interning + span-borrowed values + flat `kids[]` get
+   the default owned-`Tree` path closer to the ~3-allocs/byte target than TapeTree alone,
+   and where does each technique's reduction plateau?
+3. **Token-value interning vs span-borrow:** is there any real corpus where interning
+   repeated token values beats zero-copy borrowing, for a parser that already owns the input?
+4. **Batch analog of On-Demand:** can lark-rs elide materialization of subtrees the
+   consumer's transformer never visits, or does the tree-producing contract force full
+   materialization?
