@@ -372,9 +372,18 @@ experiment would ground the entire child-list decision better than any paper.
 
 ### Open questions (memory axis)
 
-1. **Isolated child-`Vec` cost:** benchmark SpanTree (per-node `Vec`) vs TapeTree (flat
-   `kids[]`) vs a SmallVec-inline variant on the existing corpora — the one number the
-   literature can't supply.
+1. **Isolated child-`Vec` cost — ANSWERED (2026-07-03, `examples/child_vec_alloc.rs`).**
+   Benchmarking SpanTree (per-node `Vec`) vs TapeTree (flat `kids[]`) with a counting
+   allocator — the two paths differ *only* in child-list representation, both zero-copy
+   (`tree_nodes_built == 0`) — isolates the cost to **exactly 1.000 allocation per
+   internal node**, flat across a 43× size sweep (0.997→1.000→1.000). That single
+   per-node `Vec` is **~96% of `parse_span()`'s remaining allocations** (0.165 of 0.172
+   allocs/byte); the flat `kids[]` arena (`parse_tape`) removes it, landing at **0.007
+   allocs/byte** for a ~1.76× wall-clock trend. So the per-node child `Vec` — not token
+   strings or labels — is the dominant residual span-path allocation, and the flat
+   child arena (M1/M5, the `Tape` direction #243) is the confirmed lever. A SmallVec-
+   inline variant remains unmeasured. Full write-up: `BENCH.md` §"The per-node
+   child-`Vec` cost, isolated".
 2. **Marginal stacking:** does label-interning + span-borrowed values + flat `kids[]` get
    the default owned-`Tree` path closer to the ~3-allocs/byte target than TapeTree alone,
    and where does each technique's reduction plateau?

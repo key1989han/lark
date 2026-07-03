@@ -613,6 +613,37 @@ dominated by working buffers both paths share (parser stacks, the token `Vec`, t
 not-yet-reused per-node child `Vec` #583 tracks). That remaining volume is what the
 arena/`Tape` follow-ups (#242/#243) target.
 
+### The per-node child-`Vec` cost, isolated (`child_vec_alloc`)
+
+The 2026-07 parser-optimization literature study
+(`docs/notes/parser-optimization-research-2026-07.md`, Part 3 / finding M5) noted
+that *no external source* isolates the per-node child-`Vec` cost — but lark-rs can,
+because `SpanTree` and `TapeTree` are the same zero-copy parse differing **only** in
+the child-list representation (`SpanBranch` owns one `children: Vec` per internal
+node; `TapeTree` appends every node's children to one shared flat `kids[]`). With a
+counting allocator, `allocs(parse_span) − allocs(parse_tape)` is therefore exactly
+the child-`Vec` traffic. `examples/child_vec_alloc.rs` is the re-runnable measurement:
+
+```bash
+cargo run --release --features "span-tree,tape-tree,perf-counters" \
+  --example child_vec_alloc [records]
+```
+
+Result (dev box, 594 KB JSON, 98 001 internal nodes): the child-`Vec` cost is
+**exactly 1.000 allocations per internal node** and **flat** across a 43× size sweep
+(0.997 @ 56 KB → 1.000 @ 594 KB → 1.000 @ 2.4 MB) — the "one `Vec` per node,
+independent of size" the flattening literature (Sampson, *Flattening ASTs*)
+predicts. That single per-node allocation is **~96% of `parse_span()`'s remaining
+allocations** (0.165 of 0.172 allocs/byte), and the flat `kids[]` arena removes it:
+`parse_tape()` lands at **0.007 allocs/byte** (O(log n) allocator calls) for a
+**~1.76× wall-clock** trend over `parse_span()`. Both paths hold the zero-copy
+invariant (`tree_nodes_built == 0`, `token_value_string_bytes == 0`), so the delta
+is a clean isolation, not a confound. Conclusion: the per-node child `Vec` — not the
+token strings or labels — is the dominant residual allocation on the span path, and a
+shared flat child arena (the `Tape` direction, #243) is the lever that removes it.
+This is a recorded measurement, not a gate (ADR-0007); the deterministic child-buffer
+*gate* is `tests/test_child_vec_scaling.rs` on the `parse_into` path.
+
 **Sequencing implication.** The single cheapest, highest-leverage, lowest-risk win
 was the lexer pair (1)+(2): it attacks the larger (~55%) half, is purely local to
 `Scanner`, touches no public type, and benefits both engines — so it was safe to do
