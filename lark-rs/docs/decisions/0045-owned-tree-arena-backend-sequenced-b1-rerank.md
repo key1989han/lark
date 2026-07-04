@@ -54,10 +54,24 @@ backend behind the `OutputBuilder` seam, (b) a breaking change to the default
    backend's API feedback and the M6 (token-value) picture. The
    SmallVec-of-child-*refs* design is the recorded fallback if a single shared
    child buffer proves undesirable (e.g. subtree-local mutation).
-3. **No separate `Token.type_` removal**: the redundancy with `type_id` is
-   resolved by ADR-0042's `Arc<str>` storage (clone = refcount bump) and its
-   accessor encapsulation keeps lazy resolution open — a field-removal
-   deprecation would add churn for no further allocation win.
+3. **`Token.type_` field-drop: superseded by ADR-0042 for the allocation
+   intent; the hot-path residual is deferred, not delivered.** ADR-0042
+   eliminates the per-token label *allocation* via interned `Arc<str>` with no
+   lifetime tie — a counting allocator shows an interned-`Arc<str>` token and
+   an id-only token allocate identically. The field-drop itself is ADR-0042's
+   **explicitly-rejected Option 2** (resolve `type_` from `type_id`; rejected
+   on grammar-lifetime blast-radius grounds) — so it was priced and declined,
+   not absorbed. A real residual remains on the floor: `Token` still carries
+   `type_` (16 B + two atomic refcount RMWs per token) redundantly with the
+   `Copy` `type_id` — measured ~+22% of token-handling today (owned-`String`
+   values) and up to ~4.8× in a value-less (M6/`SpanTree`) token path
+   (same-session microbench *isolation*, not end-to-end; the bench also used
+   `&'static` names, hiding Option 2's lifetime cost). **Deferred to the
+   M6/span `Token`-surface change**, where the residual is largest and an API
+   break is already being paid; re-measure end-to-end there and weigh against
+   Option 2's lifetime blast radius. This is *not* a reversal of ADR-0042:
+   `Arc<str>` is a strict Pareto win over the current `String` and lands
+   as-is.
 
 ## Consequences
 
