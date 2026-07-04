@@ -1,6 +1,6 @@
 # ADR-0045: Owned-tree layout lands sequenced — opt-in arena backend before any default `Tree`/`Child` change; baked DFA re-ranked to a one-shot/standalone lever
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted — ratified by the architect (2026-07-04)
 - **Date:** 2026-07-03
 
 ## Context

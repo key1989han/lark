@@ -1,6 +1,6 @@
 # ADR-0046: Standalone bake (L5) — byte-class DFA tables as static data + interned output in generated parsers; refuse-with-override for contextual-load-bearing grammars
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted — ratified by the architect (2026-07-04)
 - **Date:** 2026-07-03
 
 ## Context
